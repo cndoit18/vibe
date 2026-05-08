@@ -1,6 +1,6 @@
 import subprocess
 
-from langchain_core.tools import tool
+from vibe.tools._safety import truncate_output, tool
 
 
 @tool
@@ -26,6 +26,6 @@ def bash(command: str, timeout: int = 30) -> str:
             output += f"\nSTDERR:\n{result.stderr}"
         if result.returncode != 0:
             output += f"\nExit code: {result.returncode}"
-        return output.strip() or "(no output)"
+        return truncate_output(output.strip() or "(no output)")
     except subprocess.TimeoutExpired:
         return f"Command timed out after {timeout}s"
