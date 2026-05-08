@@ -10,6 +10,13 @@ Be concise. Explain what you're doing, not what you could do.
 When using tools, prefer the most direct approach."""
 
 
+def should_continue(state: AgentState) -> str:
+    last = state["messages"][-1]
+    if isinstance(last, AIMessage) and last.tool_calls:
+        return "tools"
+    return "end"
+
+
 def build_graph(llm, tools: list):
     """构建 agent graph：llm_call → should_continue → tool_node → 循环"""
     llm_with_tools = llm.bind_tools(tools)
@@ -18,12 +25,6 @@ def build_graph(llm, tools: list):
     def llm_call(state: AgentState):
         response = llm_with_tools.invoke([SystemMessage(content=SYSTEM_PROMPT)] + state["messages"])
         return {"messages": [response]}
-
-    def should_continue(state: AgentState) -> str:
-        last = state["messages"][-1]
-        if isinstance(last, AIMessage) and last.tool_calls:
-            return "tools"
-        return "end"
 
     graph = StateGraph(AgentState)
     graph.add_node("llm_call", llm_call)
