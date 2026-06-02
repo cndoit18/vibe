@@ -42,3 +42,17 @@ class TestReadTool:
         f.write_text("line1")
         result = read.invoke({"path": "hello.txt", "offset": 100})
         assert "no lines" in result
+
+    def test_read_rejects_negative_offset(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "hello.txt"
+        f.write_text("line1")
+        result = read.invoke({"path": "hello.txt", "offset": -1})
+        assert "offset must be >= 0" in result
+
+    def test_read_rejects_non_positive_limit(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "hello.txt"
+        f.write_text("line1")
+        result = read.invoke({"path": "hello.txt", "limit": 0})
+        assert "limit must be >= 1" in result

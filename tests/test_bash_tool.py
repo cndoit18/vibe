@@ -21,3 +21,7 @@ class TestBashTool:
     def test_no_output(self):
         result = bash.invoke({"command": "true"})
         assert "(no output)" in result
+
+    def test_rejects_non_positive_timeout(self):
+        result = bash.invoke({"command": "true", "timeout": 0})
+        assert "timeout must be >= 1" in result

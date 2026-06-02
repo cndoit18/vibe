@@ -1,8 +1,14 @@
-from vibe.tools._safety import check_file_size, tool, truncate_output, validate_path
+from vibe.tools.hooks import IntRange, MaxFileBytes, TruncateResult, WorkspacePath, WorkspacePathValue, tool
 
 
-@tool
-def read(path: str, offset: int = 0, limit: int = 2000) -> str:
+@tool(
+    WorkspacePath("path", require_file=True),
+    MaxFileBytes("path"),
+    IntRange("offset", min=0),
+    IntRange("limit", min=1),
+    TruncateResult(),
+)
+def read(path: WorkspacePathValue, offset: int = 0, limit: int = 2000) -> str:
     """Read file contents. Returns lines from offset (0-based) up to limit lines.
 
     Args:
@@ -10,12 +16,7 @@ def read(path: str, offset: int = 0, limit: int = 2000) -> str:
         offset: Line number to start reading from (0-based). Defaults to 0.
         limit: Maximum number of lines to read. Defaults to 2000.
     """
-    resolved = validate_path(path)
-    if not resolved.is_file():
-        raise ValueError(f"'{path}' is not a file")
-    check_file_size(resolved)
-
-    lines = resolved.read_text(errors="replace").splitlines()
+    lines = path.read_text().splitlines()
     selected = lines[offset : offset + limit]
     if not selected:
         return "(no lines in range)"
@@ -24,4 +25,4 @@ def read(path: str, offset: int = 0, limit: int = 2000) -> str:
     if offset > 0:
         header = f"(showing lines {offset}-{offset + len(selected) - 1} of {len(lines)})\n"
 
-    return truncate_output(header + "\n".join(selected))
+    return header + "\n".join(selected)

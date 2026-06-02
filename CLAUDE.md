@@ -27,6 +27,17 @@ LangGraph `StateGraph` ReAct loop: `START → llm_call → should_continue? → 
 
 - `src/vibe/agent/graph.py` — graph definition, system prompt, node wiring
 - `src/vibe/agent/state.py` — `AgentState(MessagesState)`
-- `src/vibe/tools/bash.py` — shell execution tool (30s timeout); `read`/`write`/`edit` tools planned
+- `src/vibe/tools/bash.py` — shell execution tool with 30s timeout
+- `src/vibe/tools/read.py`, `write.py`, `edit.py` — file tools guarded by hook-based `src/vibe/tools/runtime.py`
+- `src/vibe/tools/runtime.py` — hook-based runtime tools that implement LangChain `BaseTool` directly
 - `src/vibe/session/store.py` — JSONL append-only session persistence
 - `src/vibe/cli.py` — argparse CLI entry point
+
+## Tool Safety & Sessions
+
+- File tools are constrained to the current working directory, reject files over 1 MB, and truncate output at 30,000 chars.
+- Sessions are append-only JSONL files under `~/.vibe/sessions`.
+
+## References
+
+- Use `@docs/01-tech-stack.md`, `@docs/02-architecture.md`, and `@docs/03-roadmap.md` for deeper design context when needed.

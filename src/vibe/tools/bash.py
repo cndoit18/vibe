@@ -1,9 +1,9 @@
 import subprocess
 
-from vibe.tools._safety import truncate_output, tool
+from vibe.tools.hooks import IntRange, TruncateResult, tool
 
 
-@tool
+@tool(IntRange("timeout", min=1), TruncateResult())
 def bash(command: str, timeout: int = 30) -> str:
     """Execute a shell command and return its output.
 
@@ -26,6 +26,6 @@ def bash(command: str, timeout: int = 30) -> str:
             output += f"\nSTDERR:\n{result.stderr}"
         if result.returncode != 0:
             output += f"\nExit code: {result.returncode}"
-        return truncate_output(output.strip() or "(no output)")
+        return output.strip() or "(no output)"
     except subprocess.TimeoutExpired:
         return f"Command timed out after {timeout}s"

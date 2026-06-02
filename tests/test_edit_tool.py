@@ -33,3 +33,17 @@ class TestEditTool:
         monkeypatch.chdir(tmp_path)
         result = edit.invoke({"path": "/etc/hosts", "old_string": "x", "new_string": "y"})
         assert "outside" in result.lower()
+
+    def test_edit_rejects_empty_old_string(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "file.txt"
+        f.write_text("hello")
+        result = edit.invoke({"path": "file.txt", "old_string": "", "new_string": "x"})
+        assert "old_string must not be empty" in result
+
+    def test_edit_rejects_oversized_updated_content(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "file.txt"
+        f.write_text("x")
+        result = edit.invoke({"path": "file.txt", "old_string": "x", "new_string": "y" * 1_000_001})
+        assert "exceeds" in result.lower()
