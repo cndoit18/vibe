@@ -181,7 +181,10 @@ class VibeTUI:
         return Text.assemble(("* ", "yellow"), (event.name or "tool", "cyan"), (f" {event.content}", "dim"))
 
     def _tool_result(self, event: AgentEvent):
-        return Text.assemble(("  → ", "bright_black"), (event.content[:500], "dim"))
+        lines = event.content.split("\n")
+        first = f"  → {lines[0]}"
+        rest = [f"    {line}" for line in lines[1:]]
+        return Text("\n".join([first, *rest]), style="dim")
 
     def _input_prompt(self):
         return Text.assemble(("› ", "bold bright_black"))
