@@ -1,15 +1,19 @@
 import subprocess
+from typing import Annotated
 
-from vibe.tools.hooks import IntRange, TruncateResult, tool
+from pydantic import Field
+
+from vibe.tools.runtime import tool
 
 
-@tool(IntRange("timeout", min=1), TruncateResult())
-def bash(command: str, timeout: int = 30) -> str:
+@tool
+def bash(
+    command: Annotated[str, Field(description="Shell command to execute.")],
+    timeout: Annotated[int, Field(ge=1, description="Maximum execution time in seconds.")] = 30,
+) -> str:
     """Execute a shell command and return its output.
 
-    Args:
-        command: The shell command to execute.
-        timeout: Maximum execution time in seconds. Defaults to 30.
+    Use this for commands that inspect or operate on the workspace. Prefer narrower commands when possible.
     """
     try:
         result = subprocess.run(

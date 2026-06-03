@@ -1,4 +1,4 @@
-from vibe.tools.bash import bash
+from vibe.tools import bash
 
 
 class TestBashTool:

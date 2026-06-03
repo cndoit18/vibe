@@ -8,12 +8,12 @@ from langchain_core.messages import HumanMessage
 
 from vibe.agent.graph import build_graph
 from vibe.session.store import SessionStore
-from vibe.tools import ALL_TOOLS
+from vibe.tools import bash, edit, read, write
 
 
 def run(prompt: str, session_id: str | None = None, model: str = "gpt-4o", base_url: str | None = None):
     llm = ChatOpenAI(model=model, base_url=base_url, api_key=os.environ.get("OPENAI_API_KEY"))
-    agent = build_graph(llm, ALL_TOOLS)
+    agent = build_graph(llm, [bash, read, write, edit])
     store = SessionStore()
 
     if session_id is None:

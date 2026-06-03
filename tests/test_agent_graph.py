@@ -5,13 +5,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from vibe.agent.graph import build_graph, should_continue, SYSTEM_PROMPT
 from vibe.agent.state import AgentState
-from vibe.tools import ALL_TOOLS
+from vibe.tools import bash, edit, read, write
 
 
 @pytest.fixture
 def compiled_graph():
     llm = MagicMock()
-    return build_graph(llm, ALL_TOOLS)
+    return build_graph(llm, [bash, read, write, edit])
 
 
 class TestBuildGraph:

@@ -1,22 +1,23 @@
-from vibe.tools.hooks import IntRange, MaxFileBytes, TruncateResult, WorkspacePath, WorkspacePathValue, tool
+from typing import Annotated
+
+from pydantic import Field
+
+from vibe.tools.paths import workspace_file
+from vibe.tools.runtime import tool
 
 
-@tool(
-    WorkspacePath("path", require_file=True),
-    MaxFileBytes("path"),
-    IntRange("offset", min=0),
-    IntRange("limit", min=1),
-    TruncateResult(),
-)
-def read(path: WorkspacePathValue, offset: int = 0, limit: int = 2000) -> str:
-    """Read file contents. Returns lines from offset (0-based) up to limit lines.
+@tool
+def read(
+    path: Annotated[str, Field(description="File path inside the current workspace.")],
+    offset: Annotated[int, Field(ge=0, description="Zero-based line offset to start reading from.")] = 0,
+    limit: Annotated[int, Field(ge=1, le=2000, description="Maximum number of lines to return.")] = 2000,
+) -> str:
+    """Read a workspace file.
 
-    Args:
-        path: File path relative to working directory.
-        offset: Line number to start reading from (0-based). Defaults to 0.
-        limit: Maximum number of lines to read. Defaults to 2000.
+    Use this before editing or when you need exact file contents. Use offset and limit to inspect large files in
+    smaller chunks.
     """
-    lines = path.read_text().splitlines()
+    lines = workspace_file(path).read_text().splitlines()
     selected = lines[offset : offset + limit]
     if not selected:
         return "(no lines in range)"

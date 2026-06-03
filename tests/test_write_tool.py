@@ -1,4 +1,4 @@
-from vibe.tools.write import write
+from vibe.tools import write
 
 
 class TestWriteTool:
@@ -24,6 +24,12 @@ class TestWriteTool:
         monkeypatch.chdir(tmp_path)
         result = write.invoke({"path": "/tmp/evil.txt", "content": "nope"})
         assert "outside" in result.lower()
+
+    def test_write_rejects_file_as_parent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "file.txt").write_text("parent")
+        result = write.invoke({"path": "file.txt/child.txt", "content": "nope"})
+        assert "parent path" in result
 
     def test_write_oversized_content(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

@@ -1,16 +1,20 @@
-from vibe.tools.hooks import MaxTextBytes, WorkspacePath, WorkspacePathValue, tool
+from typing import Annotated
+
+from pydantic import Field
+
+from vibe.tools.paths import workspace_path
+from vibe.tools.runtime import tool
 
 
-@tool(
-    WorkspacePath("path", create_parents=True),
-    MaxTextBytes("content"),
-)
-def write(path: WorkspacePathValue, content: str) -> str:
-    """Create or overwrite a file with the given content.
+@tool
+def write(
+    path: Annotated[str, Field(description="File path inside the current workspace.")],
+    content: Annotated[str, Field(description="Text content to write to the file.")],
+) -> str:
+    """Create or overwrite a workspace file.
 
-    Args:
-        path: File path relative to working directory.
-        content: The text content to write.
+    Use this when you need to write complete file contents. Parent directories are created automatically.
     """
-    path.write_text(content)
-    return f"Wrote {len(content)} chars to '{path.display}'"
+    target = workspace_path(path, create_parents=True)
+    target.write_text(content)
+    return f"Wrote {len(content)} chars to '{target.display}'"

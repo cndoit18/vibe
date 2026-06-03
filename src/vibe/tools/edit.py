@@ -1,28 +1,31 @@
-from vibe.tools.hooks import MaxFileBytes, MaxTextBytes, NonEmptyText, WorkspacePath, WorkspacePathValue, tool
+from typing import Annotated
+
+from pydantic import Field
+
+from vibe.tools.paths import workspace_file
+from vibe.tools.runtime import tool
 
 
-@tool(
-    WorkspacePath("path", require_file=True),
-    MaxFileBytes("path"),
-    NonEmptyText("old_string"),
-    MaxTextBytes("new_string"),
-)
-def edit(path: WorkspacePathValue, old_string: str, new_string: str) -> str:
-    """Replace an exact string in a file. Fails if old_string is not found or appears more than once.
+@tool
+def edit(
+    path: Annotated[str, Field(description="File path inside the current workspace.")],
+    old_string: Annotated[str, Field(min_length=1, description="Exact text to replace; it must appear exactly once.")],
+    new_string: Annotated[str, Field(description="Replacement text.")],
+) -> str:
+    """Replace exactly one occurrence of text in a workspace file.
 
-    Args:
-        path: File path relative to working directory.
-        old_string: The exact text to find and replace.
-        new_string: The replacement text.
+    Use this for precise in-place edits. The old_string must match exactly once; if it appears multiple times, include
+    more surrounding context.
     """
-    content = path.read_text()
+    target = workspace_file(path)
+    content = target.read_text()
     count = content.count(old_string)
 
     if count == 0:
-        raise ValueError(f"old_string not found in '{path.display}'")
+        raise ValueError(f"old_string not found in '{target.display}'")
     if count > 1:
-        raise ValueError(f"old_string appears {count} times in '{path.display}' — must be unique")
+        raise ValueError(f"old_string appears {count} times in '{target.display}'; provide a more specific string")
 
     updated = content.replace(old_string, new_string, 1)
-    path.write_text(updated)
-    return f"Edited '{path.display}': replaced {len(old_string)} chars with {len(new_string)} chars"
+    target.write_text(updated)
+    return f"Edited '{target.display}': replaced {len(old_string)} chars with {len(new_string)} chars"

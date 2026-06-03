@@ -1,4 +1,4 @@
-from vibe.tools.edit import edit
+from vibe.tools import edit
 
 
 class TestEditTool:

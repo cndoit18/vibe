@@ -1,90 +1,54 @@
 import inspect
+import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, PrivateAttr, create_model
+from pydantic import BaseModel, PrivateAttr, ValidationError, create_model
+
+MAX_INLINE_OUTPUT_CHARS = 30_000
 
 
-@dataclass
-class ToolContext:
-    name: str
-    raw_args: dict[str, Any]
-    args: dict[str, Any]
-    result: Any = None
-    hooks: list["Hook"] = field(default_factory=list)
-
-
-class Hook:
-    def prepare(self, ctx: ToolContext) -> None:
-        pass
-
-    def after(self, ctx: ToolContext) -> None:
-        pass
-
-    def on_error(self, ctx: ToolContext, error: Exception) -> str | None:
-        return None
-
-
-class RuntimeTool(BaseTool):
+class Tool(BaseTool):
     _func: Callable[..., str] = PrivateAttr()
-    _hooks: tuple[Hook, ...] = PrivateAttr()
 
-    def __init__(self, func: Callable[..., str], hooks: tuple[Hook, ...]) -> None:
-        super().__init__(name=func.__name__, description=inspect.getdoc(func) or "", args_schema=_args_schema(func))
+    def __init__(self, func: Callable[..., str]) -> None:
+        super().__init__(
+            name=func.__name__,
+            description=inspect.getdoc(func) or "",
+            args_schema=_args_schema(func),
+            handle_validation_error=_validation_error_message,
+        )
         self._func = func
-        self._hooks = hooks
 
     @property
     def func(self) -> Callable[..., str]:
         return self._func
 
     @property
-    def hooks(self) -> tuple[Hook, ...]:
-        return self._hooks
-
-    @property
     def signature(self) -> inspect.Signature:
         return inspect.signature(self.func)
 
-    @property
-    def external_signature(self) -> inspect.Signature:
-        parameters = [
-            parameter.replace(annotation=_external_annotation(parameter.annotation))
-            for parameter in self.signature.parameters.values()
-        ]
-        return self.signature.replace(parameters=parameters)
-
     def _run(self, **kwargs: Any) -> str:
-        bound = self.signature.bind(**kwargs)
-        bound.apply_defaults()
-        ctx = ToolContext(name=self.name, raw_args=dict(kwargs), args=dict(bound.arguments))
-        ctx.hooks.extend(self.hooks)
         try:
-            self._run_prepare_hooks(ctx)
-            ctx.result = self.func(**ctx.args)
-            for hook in reversed(ctx.hooks):
-                hook.after(ctx)
-            return ctx.result
-        except Exception as error:
-            for hook in reversed(ctx.hooks):
-                handled = hook.on_error(ctx, error)
-                if handled is not None:
-                    return handled
-            raise
+            result = self.func(**kwargs)
+        except ValidationError as error:
+            return _validation_error_message(error)
+        except ValueError as error:
+            return f"Error: {error}"
 
-    def _run_prepare_hooks(self, ctx: ToolContext) -> None:
-        index = 0
-        while index < len(ctx.hooks):
-            ctx.hooks[index].prepare(ctx)
-            index += 1
+        return _deliver_output(self.name, result)
+
+
+def tool(func: Callable[..., str]) -> Tool:
+    return Tool(func)
 
 
 def _args_schema(func: Callable[..., str]) -> type[BaseModel]:
     fields = {}
     for parameter in inspect.signature(func).parameters.values():
-        annotation = _external_annotation(parameter.annotation)
+        annotation = parameter.annotation
         if annotation is inspect.Signature.empty:
             annotation = Any
         default = ... if parameter.default is inspect.Signature.empty else parameter.default
@@ -93,5 +57,28 @@ def _args_schema(func: Callable[..., str]) -> type[BaseModel]:
     return create_model(f"{func.__name__.title()}Input", **fields)
 
 
-def _external_annotation(annotation: Any) -> Any:
-    return getattr(annotation, "__tool_external_annotation__", annotation)
+def _validation_error_message(error: ValidationError) -> str:
+    issue = error.errors()[0]
+    field = ".".join(str(part) for part in issue["loc"])
+    context = issue.get("ctx") or {}
+    if issue["type"] == "greater_than_equal":
+        return f"Error: {field} must be >= {context['ge']}"
+    if issue["type"] == "less_than_equal":
+        return f"Error: {field} must be <= {context['le']}"
+    if issue["type"] == "string_too_short":
+        return f"Error: {field} must not be empty"
+    return f"Error: {field} {issue['msg']}"
+
+
+def _deliver_output(tool_name: str, result: str) -> str:
+    if len(result) <= MAX_INLINE_OUTPUT_CHARS:
+        return result
+
+    output_dir = Path(".vibe") / "tmp"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"tool-output-{tool_name}-{uuid.uuid4().hex[:8]}.txt"
+    output_path.write_text(result, encoding="utf-8", errors="replace")
+    return (
+        f"Tool output is {len(result)} chars, saved to '{output_path}'. "
+        "Use read with offset and limit, or bash with grep, to inspect the saved output."
+    )

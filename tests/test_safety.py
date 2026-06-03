@@ -1,151 +1,114 @@
-from vibe.tools import ALL_TOOLS, RUNTIME_TOOLS
-from vibe.tools.hooks import (
-    MAX_OUTPUT_CHARS,
-    DynamicHooks,
-    IntRange,
-    MaxFileBytes,
-    MaxTextBytes,
-    TruncateResult,
-    WorkspacePath,
-    WorkspacePathValue,
-    tool,
-    truncate_output,
-)
-from vibe.tools.runtime import Hook, ToolContext
+from vibe.tools import read
+from vibe.tools.paths import MAX_FILE_SIZE, workspace_file, workspace_path
+from vibe.tools.runtime import MAX_INLINE_OUTPUT_CHARS, Tool, tool
 
 
-class TestRuntimeTool:
-    def test_invoke_applies_prepare_before_body_after(self):
-        events = []
-
-        class RecordingHook(Hook):
-            def prepare(self, ctx: ToolContext) -> None:
-                events.append("prepare")
-                ctx.args["value"] += 1
-
-            def after(self, ctx: ToolContext) -> None:
-                events.append("after")
-                ctx.result += " after"
-
-        @tool(RecordingHook())
-        def sample(value: int) -> str:
-            events.append("body")
-            return f"value={value}"
-
-        assert sample.invoke({"value": 1}) == "value=2 after"
-        assert events == ["prepare", "body", "after"]
-
-    def test_dynamic_hooks_run_in_same_invocation(self):
-        class UppercaseHook(Hook):
-            def after(self, ctx: ToolContext) -> None:
-                ctx.result = ctx.result.upper()
-
-        @tool(DynamicHooks(lambda ctx: [UppercaseHook()]))
+class TestTool:
+    def test_value_error_returns_prompt_readable_error(self):
         def sample() -> str:
-            return "hello"
-
-        assert sample.invoke({}) == "HELLO"
-
-    def test_value_error_returns_error_string(self):
-        @tool()
-        def sample() -> str:
+            """Sample command."""
             raise ValueError("bad")
 
-        assert sample.invoke({}) == "Error: bad"
+        assert Tool(sample).invoke({}) == "Error: bad"
+
+    def test_validation_error_returns_prompt_readable_error(self):
+        from typing import Annotated
+
+        from pydantic import Field
+
+        def sample(limit: Annotated[int, Field(ge=1)]) -> str:
+            """Sample command."""
+            return str(limit)
+
+        assert "Error: limit" in Tool(sample).invoke({"limit": 0})
+
+    def test_large_output_is_saved_to_workspace_tmp(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        def sample() -> str:
+            """Sample command."""
+            return "x" * (MAX_INLINE_OUTPUT_CHARS + 1)
+
+        result = Tool(sample).invoke({})
+        assert "saved to '.vibe/tmp/tool-output-sample-" in result
+        output_file = next((tmp_path / ".vibe" / "tmp").glob("tool-output-sample-*.txt"))
+        assert output_file.read_text() == "x" * (MAX_INLINE_OUTPUT_CHARS + 1)
+
+    def test_tool_decorator_returns_tool(self):
+        @tool
+        def sample() -> str:
+            """Sample command."""
+            return "ok"
+
+        assert isinstance(sample, Tool)
+        assert sample.invoke({}) == "ok"
 
 
 class TestWorkspacePath:
-    def test_valid_path_is_converted(self, tmp_path, monkeypatch):
+    def test_workspace_file_reads_valid_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         f = tmp_path / "file.txt"
         f.write_text("hello")
 
-        @tool(WorkspacePath("path", require_file=True))
-        def sample(path: WorkspacePathValue) -> str:
-            return path.read_text()
+        assert workspace_file("file.txt").read_text() == "hello"
 
-        assert sample.invoke({"path": "file.txt"}) == "hello"
-
-    def test_rejects_absolute_outside(self, tmp_path, monkeypatch):
+    def test_workspace_path_rejects_absolute_outside(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
 
-        @tool(WorkspacePath("path"))
-        def sample(path: WorkspacePathValue) -> str:
-            return path.display
+        try:
+            workspace_path("/etc/passwd")
+        except ValueError as error:
+            assert "outside" in str(error)
+        else:
+            raise AssertionError("expected ValueError")
 
-        assert "outside" in sample.invoke({"path": "/etc/passwd"})
-
-    def test_rejects_traversal(self, tmp_path, monkeypatch):
+    def test_workspace_path_rejects_traversal(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
 
-        @tool(WorkspacePath("path"))
-        def sample(path: WorkspacePathValue) -> str:
-            return path.display
+        try:
+            workspace_path("../../etc/passwd")
+        except ValueError as error:
+            assert "outside" in str(error)
+        else:
+            raise AssertionError("expected ValueError")
 
-        assert "outside" in sample.invoke({"path": "../../etc/passwd"})
-
-    def test_rejects_non_file(self, tmp_path, monkeypatch):
+    def test_workspace_file_rejects_non_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "dir").mkdir()
 
-        @tool(WorkspacePath("path", require_file=True))
-        def sample(path: WorkspacePathValue) -> str:
-            return path.display
+        try:
+            workspace_file("dir")
+        except ValueError as error:
+            assert "not a file" in str(error)
+        else:
+            raise AssertionError("expected ValueError")
 
-        assert "not a file" in sample.invoke({"path": "dir"})
-
-
-class TestRuntimeLimits:
-    def test_large_file_rejected(self, tmp_path, monkeypatch):
+    def test_workspace_file_rejects_large_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         f = tmp_path / "big.txt"
-        f.write_bytes(b"x" * 1_000_001)
+        f.write_bytes(b"x" * (MAX_FILE_SIZE + 1))
 
-        @tool(WorkspacePath("path", require_file=True), MaxFileBytes("path"))
-        def sample(path: WorkspacePathValue) -> str:
-            return path.display
+        try:
+            workspace_file("big.txt")
+        except ValueError as error:
+            assert "exceeds" in str(error)
+        else:
+            raise AssertionError("expected ValueError")
 
-        assert "exceeds" in sample.invoke({"path": "big.txt"})
+    def test_workspace_path_write_text_rejects_large_content(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        target = workspace_path("big.txt")
 
-    def test_large_text_rejected(self):
-        @tool(MaxTextBytes("content"))
-        def sample(content: str) -> str:
-            return content
-
-        assert "exceeds" in sample.invoke({"content": "x" * 1_000_001})
-
-    def test_int_range_rejected(self):
-        @tool(IntRange("limit", min=1))
-        def sample(limit: int) -> str:
-            return str(limit)
-
-        assert "limit must be >= 1" in sample.invoke({"limit": 0})
-
-
-class TestTruncateOutput:
-    def test_short_text_unchanged(self):
-        assert truncate_output("hello") == "hello"
-
-    def test_long_text_truncated(self):
-        text = "x" * (MAX_OUTPUT_CHARS + 100)
-        result = truncate_output(text)
-        assert len(result) < len(text)
-        assert "truncated" in result
-
-    def test_hook_truncates_result(self):
-        @tool(TruncateResult(max_chars=5))
-        def sample() -> str:
-            return "x" * 10
-
-        assert "truncated" in sample.invoke({})
+        try:
+            target.write_text("x" * (MAX_FILE_SIZE + 1))
+        except ValueError as error:
+            assert "exceeds" in str(error)
+        else:
+            raise AssertionError("expected ValueError")
 
 
 class TestRuntimeToolExports:
-    def test_all_tools_are_langchain_tools(self):
-        assert [tool.name for tool in ALL_TOOLS] == ["bash", "read", "write", "edit"]
-        assert [tool.name for tool in RUNTIME_TOOLS] == ["bash", "read", "write", "edit"]
-
     def test_runtime_tool_keeps_string_path_schema(self):
-        read_tool = next(tool for tool in ALL_TOOLS if tool.name == "read")
-        schema = read_tool.args_schema.model_json_schema()
+        schema = read.args_schema.model_json_schema()
         assert schema["properties"]["path"]["type"] == "string"
+        assert schema["properties"]["limit"]["maximum"] == 2000

@@ -1,4 +1,4 @@
-from vibe.tools.read import read
+from vibe.tools import read
 
 
 class TestReadTool:
