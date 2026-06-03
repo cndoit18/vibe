@@ -19,9 +19,15 @@ ERASE_LINE = Control((ControlType.ERASE_IN_LINE, 2))
 
 
 class VibeTUI:
-    def __init__(self, session_id: str | None = None, model: str = "gpt-4o", base_url: str | None = None):
+    def __init__(
+        self,
+        session_id: str | None = None,
+        model: str = "gpt-4o",
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         self.console = Console()
-        self.conversation = AgentConversation(session_id=session_id, model=model, base_url=base_url)
+        self.conversation = AgentConversation(session_id=session_id, model=model, base_url=base_url, api_key=api_key)
 
     def run(self, initial_prompt: str | None = None):
         self._print(self._header())

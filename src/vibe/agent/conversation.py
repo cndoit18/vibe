@@ -1,4 +1,3 @@
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -20,10 +19,16 @@ class AgentEvent:
 
 
 class AgentConversation:
-    def __init__(self, session_id: str | None = None, model: str = "gpt-4o", base_url: str | None = None):
+    def __init__(
+        self,
+        session_id: str | None = None,
+        model: str = "gpt-4o",
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         self.store = SessionStore()
         self.session_id = session_id or self.store.new_session()
-        llm = ChatOpenAI(model=model, base_url=base_url, api_key=os.environ.get("OPENAI_API_KEY"))
+        llm = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
         self.agent = build_graph(llm, [bash, read, write, edit])
 
     def send(self, prompt: str) -> Iterator[AgentEvent]:
@@ -43,8 +48,15 @@ class AgentConversation:
     def _events_from_message(self, msg) -> Iterator[AgentEvent]:
         if getattr(msg, "tool_calls", None):
             for tool_call in msg.tool_calls:
-                yield AgentEvent("tool_call", str(tool_call["args"]), tool_call["name"], tool_call_id=tool_call.get("id"))
+                yield AgentEvent(
+                    "tool_call", str(tool_call["args"]), tool_call["name"], tool_call_id=tool_call.get("id")
+                )
         elif msg.type == "tool":
-            yield AgentEvent("tool_result", str(msg.content), getattr(msg, "name", None), tool_call_id=getattr(msg, "tool_call_id", None))
+            yield AgentEvent(
+                "tool_result",
+                str(msg.content),
+                getattr(msg, "name", None),
+                tool_call_id=getattr(msg, "tool_call_id", None),
+            )
         elif msg.type == "ai" and msg.content:
             yield AgentEvent("assistant", str(msg.content))

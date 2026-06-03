@@ -1,7 +1,6 @@
 from io import StringIO
 from unittest.mock import Mock, patch
 
-import pytest
 from rich.console import Console
 
 from vibe.agent.conversation import AgentEvent

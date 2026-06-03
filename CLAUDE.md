@@ -10,10 +10,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Lint: `uv run ruff check .`
 - Format: `uv run ruff format .`
 
-## Environment Variables
+## Configuration
 
-- `OPENAI_API_KEY` — required at runtime; unset = OpenAI SDK error on invoke
-- `OPENAI_BASE_URL` — optional; used as default for `--base-url` CLI flag (OpenAI-compatible endpoints)
+- `~/.vibe/settings.json` — persistent settings: `model`, `base_url`, `api_key`
+- CLI flags override settings: `-m <model>`, `--base-url <url>`
 
 ## Code Style
 
