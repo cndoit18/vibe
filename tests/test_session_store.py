@@ -20,11 +20,14 @@ class TestNewSession:
         assert nested.exists()
 
 
-@pytest.mark.parametrize("msg_cls,content,expected_type", [
-    (HumanMessage, "hello", "human"),
-    (AIMessage, "world", "ai"),
-    (HumanMessage, "你好世界", "human"),
-])
+@pytest.mark.parametrize(
+    "msg_cls,content,expected_type",
+    [
+        (HumanMessage, "hello", "human"),
+        (AIMessage, "world", "ai"),
+        (HumanMessage, "你好世界", "human"),
+    ],
+)
 def test_append_and_load(store: SessionStore, msg_cls, content, expected_type):
     session_id = store.new_session()
     store.append(session_id, msg_cls(content=content))
