@@ -3,11 +3,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from vibe.agent.state import AgentState
+from vibe.prompts import load_prompt
 
-SYSTEM_PROMPT = """You are Vibe, a coding agent running in the user's terminal.
-You help with software engineering tasks by reading files, running commands, and writing code.
-Be concise. Explain what you're doing, not what you could do.
-When using tools, prefer the most direct approach."""
+SYSTEM_PROMPT = load_prompt("system")
 
 
 def should_continue(state: AgentState) -> str:
