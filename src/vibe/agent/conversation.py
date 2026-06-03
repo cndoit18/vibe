@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import vibe  # noqa: F401 — ensures deprecation-warning filter runs before langchain imports
@@ -25,11 +25,12 @@ class AgentConversation:
         model: str = "gpt-4o",
         base_url: str | None = None,
         api_key: str | None = None,
+        permission_callback: Callable[[str, str], bool] | None = None,
     ):
         self.store = SessionStore()
         self.session_id = session_id or self.store.new_session()
         llm = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
-        self.agent = build_graph(llm, [bash, read, write, edit])
+        self.agent = build_graph(llm, [bash, read, write, edit], permission_callback)
 
     def send(self, prompt: str) -> Iterator[AgentEvent]:
         history = self.store.load(self.session_id)
