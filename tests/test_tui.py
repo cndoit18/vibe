@@ -1,6 +1,7 @@
 from io import StringIO
 from unittest.mock import Mock, patch
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from rich.console import Console
 
 from vibe.agent.conversation import AgentEvent
@@ -157,3 +158,38 @@ def test_permission_panel_allows_tool_not_all_tools():
 
     assert "allow read during this session" in output
     assert "allow all tools" not in output
+
+
+def test_load_and_render_history_restores_session_messages():
+    tui = make_tui()
+    tui.conversation.load_history.return_value = [
+        HumanMessage(content="hello"),
+        AIMessage(content="hi there"),
+    ]
+
+    tui._load_and_render_history()
+    output = tui.console.file.getvalue()
+
+    assert "hello" in output
+    assert "hi there" in output
+
+
+def test_load_and_render_history_renders_tool_calls_and_results():
+    tui = make_tui()
+    tui.conversation.load_history.return_value = [
+        HumanMessage(content="run ls"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "tc1"}],
+        ),
+        ToolMessage(content="file.txt", name="bash", tool_call_id="tc1"),
+        AIMessage(content="done"),
+    ]
+
+    tui._load_and_render_history()
+    output = tui.console.file.getvalue()
+
+    assert "run ls" in output
+    assert "bash" in output
+    assert "file.txt" in output
+    assert "done" in output

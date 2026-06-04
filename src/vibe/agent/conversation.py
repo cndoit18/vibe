@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import vibe  # noqa: F401 — ensures deprecation-warning filter runs before langchain imports
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 from vibe.agent.graph import build_graph
@@ -35,8 +35,11 @@ class AgentConversation:
         llm = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
         self.agent = build_graph(llm, [bash, read, write, edit], permission_callback)
 
+    def load_history(self) -> list[BaseMessage]:
+        return self.store.load(self.session_id)
+
     def send(self, prompt: str) -> Iterator[AgentEvent]:
-        history = self.store.load(self.session_id)
+        history = self.load_history()
         history.append(HumanMessage(content=prompt))
         self.store.append(self.session_id, history[-1])
 

@@ -79,6 +79,7 @@ class VibeTUI:
             return
 
         self._append(self._header())
+        self._load_and_render_history()
         with (
             cbreak_terminal(),
             Live(self._screen(), console=self.console, screen=False, auto_refresh=False, transient=False) as live,
@@ -114,6 +115,27 @@ class VibeTUI:
             if prompt.lower() in EXIT_COMMANDS:
                 break
             self._submit(prompt)
+
+    def _load_and_render_history(self):
+        self._ensure_state()
+        for msg in self.conversation.load_history():
+            if msg.type == "human":
+                self._append(self._user_message(msg.content))
+            else:
+                for event in self._events_from_message(msg):
+                    self._render_event(event)
+        for call in self._pending_tool_calls:
+            self._append(self._tool_call(call))
+        self._pending_tool_calls.clear()
+
+    def _events_from_message(self, msg):
+        if getattr(msg, "tool_calls", None):
+            for tc in msg.tool_calls:
+                yield AgentEvent("tool_call", str(tc["args"]), tc["name"], tc.get("id"))
+        elif msg.type == "tool":
+            yield AgentEvent("tool_result", str(msg.content), getattr(msg, "name", None), getattr(msg, "tool_call_id", None))
+        elif msg.type == "ai" and msg.content:
+            yield AgentEvent("assistant", str(msg.content))
 
     def _submit(self, prompt: str):
         self._ensure_state()
