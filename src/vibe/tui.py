@@ -1,14 +1,18 @@
 import ast
 import codecs
+from collections import deque
 import os
+import queue
 import select
 import sys
 import termios
+import threading
 import tty
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
-from rich.console import Console, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -35,6 +39,12 @@ class PermissionRequest:
     selected: int = 0
 
 
+@dataclass(frozen=True)
+class AgentThreadMessage:
+    kind: str
+    payload: Any = None
+
+
 class VibeTUI:
     def __init__(
         self,
@@ -50,6 +60,14 @@ class VibeTUI:
         self._permission: PermissionRequest | None = None
         self._live: Live | None = None
         self._pending_tool_calls: list[AgentEvent] = []
+        self._prompt_queue: deque[str] = deque()
+        self._agent_event_queue: queue.Queue[AgentThreadMessage] = queue.Queue()
+        self._agent_thread: threading.Thread | None = None
+        self._agent_busy = False
+        self._active_prompt: str | None = None
+        self._active_first_event = False
+        self._permission_reply_queue: queue.Queue[str] | None = None
+        self._exit_after_active = False
         self.conversation = AgentConversation(
             session_id=session_id,
             model=model,
@@ -71,6 +89,22 @@ class VibeTUI:
             self._live = None
         if not hasattr(self, "_pending_tool_calls"):
             self._pending_tool_calls = []
+        if not hasattr(self, "_prompt_queue"):
+            self._prompt_queue = deque()
+        if not hasattr(self, "_agent_event_queue"):
+            self._agent_event_queue = queue.Queue()
+        if not hasattr(self, "_agent_thread"):
+            self._agent_thread = None
+        if not hasattr(self, "_agent_busy"):
+            self._agent_busy = False
+        if not hasattr(self, "_active_prompt"):
+            self._active_prompt = None
+        if not hasattr(self, "_active_first_event"):
+            self._active_first_event = False
+        if not hasattr(self, "_permission_reply_queue"):
+            self._permission_reply_queue = None
+        if not hasattr(self, "_exit_after_active"):
+            self._exit_after_active = False
 
     def run(self, initial_prompt: str | None = None):
         self._ensure_state()
@@ -85,19 +119,29 @@ class VibeTUI:
             Live(self._screen(), console=self.console, screen=False, auto_refresh=False, transient=False) as live,
         ):
             self._live = live
-            self._refresh()
+            decoder = codecs.getincrementaldecoder("utf-8")("ignore")
             if initial_prompt:
-                self._submit(initial_prompt)
+                self._enqueue_prompt(initial_prompt)
+            self._refresh()
             while True:
+                self._drain_agent_events()
+                self._start_next_prompt_if_idle()
+                if self._exit_after_active and not self._agent_busy:
+                    break
                 try:
-                    prompt = self._read_terminal_prompt()
+                    key = read_key(decoder, timeout=0.05)
                 except (EOFError, KeyboardInterrupt):
                     break
-                if not prompt:
+                if key.name == "timeout":
                     continue
-                if prompt.lower() in EXIT_COMMANDS:
+                try:
+                    if self._permission:
+                        self._handle_permission_key(key)
+                    elif self._handle_prompt_key(key, decoder):
+                        break
+                except (EOFError, KeyboardInterrupt):
                     break
-                self._submit(prompt)
+                self._refresh()
         self._live = None
 
     def _run_plain(self, initial_prompt: str | None):
@@ -120,7 +164,7 @@ class VibeTUI:
         self._ensure_state()
         for msg in self.conversation.load_history():
             if msg.type == "human":
-                self._append(self._user_message(msg.content))
+                self._append(self._user_message(str(msg.content)))
             else:
                 for event in self._events_from_message(msg):
                     self._render_event(event)
@@ -157,6 +201,72 @@ class VibeTUI:
         self._status = None
         self._refresh()
 
+    def _enqueue_prompt(self, prompt: str):
+        self._ensure_state()
+        self._prompt_queue.append(prompt)
+        self._input = ""
+        self._refresh()
+
+    def _start_next_prompt_if_idle(self):
+        self._ensure_state()
+        if self._agent_busy or not self._prompt_queue:
+            return
+        prompt = self._prompt_queue.popleft()
+        self._append(self._user_message(prompt))
+        self._status = Text("thinking", style="cyan")
+        self._pending_tool_calls = []
+        self._agent_busy = True
+        self._active_prompt = prompt
+        self._active_first_event = True
+        self._agent_thread = threading.Thread(target=self._run_agent_worker, args=(prompt,), daemon=True)
+        self._agent_thread.start()
+        self._refresh()
+
+    def _run_agent_worker(self, prompt: str):
+        try:
+            for event in self.conversation.send(prompt):
+                self._agent_event_queue.put(AgentThreadMessage("agent_event", event))
+        except Exception as error:
+            self._agent_event_queue.put(AgentThreadMessage("agent_error", error))
+        finally:
+            self._agent_event_queue.put(AgentThreadMessage("agent_done"))
+
+    def _drain_agent_events(self):
+        self._ensure_state()
+        changed = False
+        while True:
+            try:
+                message = self._agent_event_queue.get_nowait()
+            except queue.Empty:
+                break
+            changed = True
+            self._handle_agent_thread_message(message)
+        if changed:
+            self._refresh()
+
+    def _handle_agent_thread_message(self, message: AgentThreadMessage):
+        if message.kind == "agent_event":
+            if self._active_first_event:
+                self._status = None
+                self._active_first_event = False
+            self._render_event(message.payload)
+        elif message.kind == "agent_error":
+            self._append(Text(f"Error: {message.payload}", style="red"))
+        elif message.kind == "permission_request":
+            request, reply_queue = message.payload
+            self._permission = PermissionRequest(request.name, request.args)
+            self._permission_reply_queue = reply_queue
+        elif message.kind == "agent_done":
+            for call in self._pending_tool_calls:
+                self._append(self._tool_call(call))
+            self._pending_tool_calls.clear()
+            self._status = None
+            self._agent_busy = False
+            self._active_prompt = None
+            self._active_first_event = False
+            self._agent_thread = None
+            self._start_next_prompt_if_idle()
+
     def _read_terminal_prompt(self) -> str:
         self._ensure_state()
         self._input = ""
@@ -183,7 +293,13 @@ class VibeTUI:
             self._refresh()
 
     def _permission_prompt(self, request: ToolPermissionRequest) -> PermissionDecision:
-        choice = self._read_permission_choice(request.name, request.args)
+        self._ensure_state()
+        if self._live is None:
+            choice = self._read_permission_choice(request.name, request.args)
+        else:
+            reply_queue: queue.Queue[str] = queue.Queue(maxsize=1)
+            self._agent_event_queue.put(AgentThreadMessage("permission_request", (request, reply_queue)))
+            choice = reply_queue.get()
         if choice == "a":
             return PermissionDecision(allowed=True, grant_pattern=request.grant_pattern)
         return PermissionDecision(allowed=choice == "y")
@@ -232,6 +348,67 @@ class VibeTUI:
         choices = {"1": "y", "y": "y", "2": "a", "a": "a", "3": "n", "n": "n"}
         return choices[choice.lower()]
 
+    def _handle_prompt_key(self, key: KeyPress, decoder) -> bool:
+        if key.name == "enter":
+            prompt = self._input.strip()
+            self._input = ""
+            decoder.reset()
+            if not prompt:
+                return False
+            if prompt.lower() in EXIT_COMMANDS:
+                if self._agent_busy:
+                    self._prompt_queue.clear()
+                    self._exit_after_active = True
+                    return False
+                return True
+            self._enqueue_prompt(prompt)
+        elif key.name == "ctrl_c":
+            raise KeyboardInterrupt
+        elif key.name == "ctrl_d":
+            raise EOFError
+        elif key.name == "backspace":
+            self._input = self._input[:-1]
+            decoder.reset()
+        elif key.name == "escape":
+            self._undo_last_queued_prompt()
+        elif key.name == "partial":
+            pass
+        elif key.name == "char" and key.value.isprintable():
+            self._input += key.value
+        return False
+
+    def _handle_permission_key(self, key: KeyPress):
+        if not self._permission:
+            return
+        choices = ["y", "a", "n"]
+        if key.name == "enter":
+            self._finish_permission_choice(choices[self._permission.selected])
+        elif key.name in {"escape", "ctrl_c", "ctrl_d"}:
+            self._finish_permission_choice("n")
+        elif key.name == "up":
+            self._permission.selected = (self._permission.selected - 1) % len(choices)
+        elif key.name == "down":
+            self._permission.selected = (self._permission.selected + 1) % len(choices)
+        elif key.name == "char":
+            lower = key.value.lower()
+            if lower in ("1", "y"):
+                self._finish_permission_choice("y")
+            elif lower in ("2", "a"):
+                self._finish_permission_choice("a")
+            elif lower in ("3", "n"):
+                self._finish_permission_choice("n")
+
+    def _finish_permission_choice(self, choice: str):
+        reply_queue = self._permission_reply_queue
+        self._permission = None
+        self._permission_reply_queue = None
+        if reply_queue is not None:
+            reply_queue.put(choice)
+
+    def _undo_last_queued_prompt(self):
+        if self._prompt_queue:
+            self._prompt_queue.pop()
+
     def _render_event(self, event: AgentEvent):
         if event.kind == "tool_call":
             self._pending_tool_calls.append(event)
@@ -255,7 +432,48 @@ class VibeTUI:
         return self._pending_tool_calls.pop(0) if self._pending_tool_calls else None
 
     def _screen(self):
-        return self._permission_panel(self._permission) if self._permission else self._input_panel()
+        if self._permission:
+            return self._permission_panel(self._permission)
+        renderables = [renderable for renderable in (self._status_line(), self._queue_panel(), self._input_panel()) if renderable]
+        return Group(*renderables) if len(renderables) > 1 else renderables[0]
+
+    def _status_line(self):
+        parts: list[tuple[str, str]] = []
+        if self._status:
+            parts.append((self._status.plain, "cyan"))
+        elif self._agent_busy:
+            parts.append(("thinking", "cyan"))
+        if self._exit_after_active:
+            parts.append(("exiting after current turn", "bright_black"))
+        if not parts:
+            return None
+        chunks = []
+        for index, (text, style) in enumerate(parts):
+            if index:
+                chunks.append((" · ", "bright_black"))
+            chunks.append((text, style))
+        return Text.assemble(*chunks)
+
+    def _queue_panel(self):
+        if not self._prompt_queue:
+            return None
+        body = Text()
+        prompts = list(self._prompt_queue)
+        for index, prompt in enumerate(prompts[:3], start=1):
+            body.append(f"{index}. ", style="bright_black")
+            body.append(self._compact_prompt(prompt), style="white")
+            body.append("\n")
+        if len(prompts) > 3:
+            body.append(f"… {len(prompts) - 3} more\n", style="bright_black")
+        body.append("Esc removes the last queued item", style="bright_black")
+        title = f"Queue · {len(prompts)} pending"
+        return Panel(body, title=title, border_style="yellow", padding=(0, 1))
+
+    def _compact_prompt(self, prompt: str):
+        compact = " ".join(prompt.split())
+        if len(compact) <= 40:
+            return compact
+        return f"{compact[:37]}..."
 
     def _input_panel(self):
         line = Text.assemble(("› ", "bold bright_black"), (self._input, "white"), ("█", "white"))
@@ -359,8 +577,10 @@ def read_stdin_byte(fd: int) -> bytes:
     return os.read(fd, 1)
 
 
-def read_key(decoder=None) -> KeyPress:
+def read_key(decoder=None, timeout: float | None = None) -> KeyPress:
     fd = sys.stdin.fileno()
+    if timeout is not None and not select.select([fd], [], [], timeout)[0]:
+        return KeyPress("timeout")
     chunk = read_stdin_byte(fd)
     if not chunk:
         return KeyPress("eof")
