@@ -588,6 +588,8 @@ class VibeTUI:
         max_lines = max(self.console.height - 11, 3)
         lines = diff.splitlines()
         offset = max(0, min(offset, max(len(lines) - max_lines, 0)))
+        if self._permission:
+            self._permission.scroll_offset = offset
         visible_lines = lines[offset : offset + max_lines]
         return Syntax("\n".join(visible_lines), "diff", theme="monokai", word_wrap=False)
 
