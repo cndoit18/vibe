@@ -72,3 +72,17 @@ uv run pytest      # 运行测试
 uv run ruff check .  # 代码检查
 uv run ruff format . # 格式化
 ```
+
+### Harbor 测试逻辑
+
+```bash
+uv run pytest tests/test_harbor_agent.py
+```
+
+Harbor 适配层通过 `VibeInstalledAgent` 暴露给 Harbor，测试用 `RecordingAgent` 记录 root/agent 执行命令，用 `FakeEnvironment` 记录上传行为，因此不需要真实 Harbor 环境即可验证集成契约。
+
+测试覆盖三类行为：
+
+1. **导入契约**：`vibe.harbor_agent` 和 `src.vibe.harbor_agent` 都能加载 `VibeInstalledAgent`，且 `name()` 返回 `vibe`。
+2. **安装流程**：`install()` 会清理远端安装目录和虚拟环境，把本地源码上传到 `/installed-agent/vibe`，创建 `/opt/vibe-venv`，执行 editable install，并用 `/opt/vibe-venv/bin/vibe --help` 校验 CLI 可用。
+3. **运行流程**：`run()` 以 agent 身份执行 `/opt/vibe-venv/bin/vibe --print -- <instruction>`，输出通过 `tee` 写入 `/logs/agent/vibe.txt`，并且不会通过 `cwd` 参数覆盖工作目录。

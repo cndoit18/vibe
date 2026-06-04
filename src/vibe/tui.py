@@ -584,6 +584,19 @@ class VibeTUI:
         replace_all = args.get("replace_all") is True
         return self._scrollable_diff_preview(self._edit_diff(path, old_string, new_string, replace_all), scroll_offset)
 
+    def _write_preview(self, args: dict, scroll_offset: int = 0):
+        path = args.get("path")
+        content = args.get("content")
+        if not isinstance(path, str) or not isinstance(content, str):
+            return None
+        before = self._read_edit_preview_source(path)
+        if before is None:
+            diff = self._content_diff(path, "", content)
+            diff = diff.replace(f"• Update({path})", f"• Create({path})", 1)
+        else:
+            diff = self._content_diff(path, before, content, replace_all=True)
+        return self._scrollable_diff_preview(diff, scroll_offset)
+
     def _scrollable_diff_preview(self, diff: str, offset: int) -> Syntax:
         max_lines = max(self.console.height - 11, 3)
         lines = diff.splitlines()
@@ -727,6 +740,10 @@ class VibeTUI:
                 edit_preview = self._edit_preview(parsed_args, scroll_offset)
                 if edit_preview:
                     return edit_preview
+            if name == "write":
+                write_preview = self._write_preview(parsed_args, scroll_offset)
+                if write_preview:
+                    return write_preview
             first_arg = next(iter(parsed_args.values()))
             return f"{name}({first_arg})"
         return f"{name}({args})"

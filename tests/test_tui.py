@@ -217,7 +217,9 @@ def test_initial_prompt_is_not_read_from_input_before_submit():
 def test_permission_prompt_allows_current_tool_pattern():
     tui = make_tui()
     tui._read_permission_choice = Mock(return_value="a")
-    request = ToolPermissionRequest(name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*")
+    request = ToolPermissionRequest(
+        name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*"
+    )
 
     decision = tui._permission_prompt(request)
 
@@ -228,7 +230,9 @@ def test_permission_prompt_allows_current_tool_pattern():
 def test_permission_prompt_single_allow_does_not_add_grant_pattern():
     tui = make_tui()
     tui._read_permission_choice = Mock(return_value="y")
-    request = ToolPermissionRequest(name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*")
+    request = ToolPermissionRequest(
+        name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*"
+    )
 
     decision = tui._permission_prompt(request)
 
@@ -288,7 +292,10 @@ def test_edit_permission_preview_shows_diff_before_choices():
     output = tui.console.file.getvalue()
 
     assert output.index("Update(README.md)") < output.index("Do you want to proceed?")
-    assert output.count("\n│                                                                              │\n│ • Update") == 0
+    assert (
+        output.count("\n│                                                                              │\n│ • Update")
+        == 0
+    )
     assert "Modified 1 lines" in output
     assert "Added 1 lines" not in output
 
@@ -334,6 +341,28 @@ def test_edit_permission_preview_scrolls_to_keep_choices_visible(tmp_path, monke
     tui.console.print(tui._permission_panel(request))
     second_output = tui.console.file.getvalue()
 
+    assert "line 2" in first_output
+    assert "line 23" in second_output
+    assert "Do you want to proceed?" in second_output
+    assert "Enter to confirm" in second_output
+
+
+def test_write_permission_preview_scrolls_to_keep_choices_visible():
+    tui = make_tui()
+    tui.console = Console(file=StringIO(), force_terminal=True, width=80, height=20)
+    request = PermissionRequest(
+        "write",
+        {"path": "file.txt", "content": "\n".join(f"line {index}" for index in range(30)) + "\n"}.__repr__(),
+    )
+
+    tui.console.print(tui._permission_panel(request))
+    first_output = tui.console.file.getvalue()
+    tui.console.file = StringIO()
+    request.scroll_offset = 23
+    tui.console.print(tui._permission_panel(request))
+    second_output = tui.console.file.getvalue()
+
+    assert "Create(file.txt)" in first_output
     assert "line 2" in first_output
     assert "line 23" in second_output
     assert "Do you want to proceed?" in second_output
@@ -473,7 +502,9 @@ def test_queue_status_compacts_long_or_multiline_prompts():
 def test_live_permission_prompt_uses_thread_message_queue():
     tui = make_tui()
     tui._live = object()
-    request = ToolPermissionRequest(name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*")
+    request = ToolPermissionRequest(
+        name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*"
+    )
     result_queue = Queue()
 
     thread = Thread(target=lambda: result_queue.put(tui._permission_prompt(request)))

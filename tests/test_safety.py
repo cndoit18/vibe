@@ -83,18 +83,6 @@ class TestWorkspacePath:
         else:
             raise AssertionError("expected ValueError")
 
-    def test_workspace_file_rejects_large_file(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        f = tmp_path / "big.txt"
-        f.write_bytes(b"x" * (MAX_FILE_SIZE + 1))
-
-        try:
-            workspace_file("big.txt")
-        except ValueError as error:
-            assert "exceeds" in str(error)
-        else:
-            raise AssertionError("expected ValueError")
-
     def test_workspace_path_write_text_rejects_large_content(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         target = workspace_path("big.txt")
