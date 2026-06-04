@@ -347,6 +347,45 @@ def test_edit_permission_preview_scrolls_to_keep_choices_visible(tmp_path, monke
     assert "Enter to confirm" in second_output
 
 
+def test_edit_permission_preview_clamps_stored_scroll_offset(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    lines = [f"line {index}" for index in range(30)]
+    lines[3] = "target"
+    lines[24] = "target"
+    (tmp_path / "file.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tui = make_tui()
+    tui.console = Console(file=StringIO(), force_terminal=True, width=80, height=20)
+    request = PermissionRequest(
+        "edit",
+        "{'path': 'file.txt', 'old_string': 'target', 'new_string': 'value', 'replace_all': True}",
+        scroll_offset=999,
+    )
+
+    tui._permission = request
+    tui.console.print(tui._screen())
+
+    assert request.scroll_offset == 25
+
+
+def test_permission_call_preview_clamps_offset_from_full_diff(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    lines = [f"line {index}" for index in range(30)]
+    lines[3] = "target"
+    lines[24] = "target"
+    (tmp_path / "file.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tui = make_tui()
+    tui.console = Console(file=StringIO(), force_terminal=True, width=80, height=20)
+    tui._permission = PermissionRequest(
+        "edit",
+        "{'path': 'file.txt', 'old_string': 'target', 'new_string': 'value', 'replace_all': True}",
+        scroll_offset=999,
+    )
+
+    tui._permission_call_preview(tui._permission.name, tui._permission.args, tui._permission.scroll_offset)
+
+    assert tui._permission.scroll_offset == 25
+
+
 def test_write_permission_preview_scrolls_to_keep_choices_visible():
     tui = make_tui()
     tui.console = Console(file=StringIO(), force_terminal=True, width=80, height=20)

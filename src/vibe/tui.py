@@ -49,6 +49,332 @@ class AgentThreadMessage:
     payload: Any = None
 
 
+@dataclass(frozen=True)
+class TranscriptViewEvent:
+    kind: str
+    content: str
+    name: str | None = None
+    tool_call_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PromptLiveViewModel:
+    input_text: str
+    status: str | None
+    agent_busy: bool
+    exit_after_active: bool
+    queued_prompts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PermissionDialogViewModel:
+    name: str
+    args: str
+    selected: int
+    scroll_offset: int
+    terminal_height: int
+
+
+class TerminalView:
+    def __init__(self, console: Console):
+        self.console = console
+
+    def render_header(self, session_id: str) -> RenderableType:
+        return Text.assemble(("▸ vibe", "bold cyan"), (f"  session {session_id} · /exit to quit", "dim"))
+
+    def render_transcript_event(self, event: TranscriptViewEvent) -> RenderableType:
+        if event.kind == "user":
+            return self._input_line(event.content)
+        if event.kind == "assistant":
+            return Markdown(event.content.strip("\n"))
+        if event.kind == "tool_call":
+            return Text.assemble(("* ", "yellow"), (event.name or "tool", "cyan"), (f" {event.content}", "dim"))
+        if event.kind == "tool_result":
+            lines = event.content.split("\n")
+            first = f"  → {lines[0]}"
+            rest = [f"    {line}" for line in lines[1:]]
+            return Text("\n".join([first, *rest]), style="dim")
+        return Text(event.content)
+
+    def render_live_prompt(self, model: PromptLiveViewModel) -> RenderableType:
+        renderables = [
+            renderable
+            for renderable in (
+                self._status_line(model.status, model.agent_busy, model.exit_after_active),
+                self._queue_panel(model.queued_prompts),
+                self._input_panel(model.input_text),
+            )
+            if renderable
+        ]
+        return Group(*renderables) if len(renderables) > 1 else renderables[0]
+
+    def render_permission_dialog(self, model: PermissionDialogViewModel) -> RenderableType:
+        options = [
+            "Yes",
+            f"Yes, allow {model.name} during this session",
+            "No",
+        ]
+        preview = self._permission_call_preview(model.name, model.args, model.scroll_offset, model.terminal_height)
+        header = Text.assemble((self._permission_title(model.name), "bold cyan"))
+        if isinstance(preview, str):
+            header.append("\n")
+            header.append(preview, style="dim")
+
+        footer = Text("\nDo you want to proceed?\n", style="bright_black")
+        for index, option in enumerate(options):
+            prefix = "❯" if index == model.selected else " "
+            style = "white" if index == model.selected else "bright_black"
+            footer.append(f"{prefix} {index + 1}. {option}\n", style=style)
+        footer.append("\nEsc to cancel · ↑/↓ to select · Enter to confirm", style="bright_black")
+        if not isinstance(preview, str):
+            return Panel(Group(header, preview, footer), border_style="cyan", padding=(0, 1))
+        return Panel(Group(header, footer), border_style="cyan", padding=(0, 1))
+
+    def render_input_prompt(self) -> Text:
+        return Text.assemble(("› ", "bold bright_black"))
+
+    def render_input_block(self) -> list[RenderableType]:
+        return [Rule(style="bright_black"), self._input_line(""), Rule(style="bright_black"), self._input_help()]
+
+    def _status_line(self, status: str | None, agent_busy: bool, exit_after_active: bool) -> Text | None:
+        parts: list[tuple[str, str]] = []
+        if status:
+            parts.append((status, "cyan"))
+        elif agent_busy:
+            parts.append(("thinking", "cyan"))
+        if exit_after_active:
+            parts.append(("exiting after current turn", "bright_black"))
+        if not parts:
+            return None
+        chunks = []
+        for index, (text, style) in enumerate(parts):
+            if index:
+                chunks.append((" · ", "bright_black"))
+            chunks.append((text, style))
+        return Text.assemble(*chunks)
+
+    def _queue_panel(self, queued_prompts: tuple[str, ...]) -> Panel | None:
+        if not queued_prompts:
+            return None
+        body = Text()
+        for index, prompt in enumerate(queued_prompts[:3], start=1):
+            body.append(f"{index}. ", style="bright_black")
+            body.append(self._compact_prompt(prompt), style="white")
+            body.append("\n")
+        if len(queued_prompts) > 3:
+            body.append(f"… {len(queued_prompts) - 3} more\n", style="bright_black")
+        body.append("Esc removes the last queued item", style="bright_black")
+        title = f"Queue · {len(queued_prompts)} pending"
+        return Panel(body, title=title, border_style="yellow", padding=(0, 1))
+
+    def _compact_prompt(self, prompt: str) -> str:
+        compact = " ".join(prompt.split())
+        if len(compact) <= 40:
+            return compact
+        return f"{compact[:37]}..."
+
+    def _input_panel(self, input_text: str) -> Panel:
+        line = Text.assemble(("› ", "bold bright_black"), (input_text, "white"), ("█", "white"))
+        return Panel(line, border_style="bright_black", padding=(0, 1))
+
+    def _permission_call_preview(
+        self, name: str, args: str, scroll_offset: int = 0, terminal_height: int | None = None
+    ) -> str | Syntax:
+        parsed_args = self._parse_tool_args(args)
+        if isinstance(parsed_args, dict) and parsed_args:
+            if name == "edit":
+                edit_preview = self._edit_preview(parsed_args, scroll_offset, terminal_height)
+                if edit_preview:
+                    return edit_preview
+            if name == "write":
+                write_preview = self._write_preview(parsed_args, scroll_offset, terminal_height)
+                if write_preview:
+                    return write_preview
+            first_arg = next(iter(parsed_args.values()))
+            return f"{name}({first_arg})"
+        return f"{name}({args})"
+
+    def _edit_preview(self, args: dict, scroll_offset: int = 0, terminal_height: int | None = None) -> Syntax | None:
+        path = args.get("path")
+        old_string = args.get("old_string")
+        new_string = args.get("new_string")
+        if not isinstance(path, str) or not isinstance(old_string, str) or not isinstance(new_string, str):
+            return None
+        replace_all = args.get("replace_all") is True
+        return self._scrollable_diff_preview(
+            self._edit_diff(path, old_string, new_string, replace_all), scroll_offset, terminal_height
+        )
+
+    def _write_preview(self, args: dict, scroll_offset: int = 0, terminal_height: int | None = None) -> Syntax | None:
+        path = args.get("path")
+        content = args.get("content")
+        if not isinstance(path, str) or not isinstance(content, str):
+            return None
+        before = self._read_edit_preview_source(path)
+        if before is None:
+            diff = self._content_diff(path, "", content)
+            diff = diff.replace(f"• Update({path})", f"• Create({path})", 1)
+        else:
+            diff = self._content_diff(path, before, content, replace_all=True)
+        return self._scrollable_diff_preview(diff, scroll_offset, terminal_height)
+
+    def _scrollable_diff_preview(self, diff: str, offset: int, terminal_height: int | None = None) -> Syntax:
+        max_lines = max((terminal_height or self.console.height) - 11, 3)
+        lines = diff.splitlines()
+        offset = max(0, min(offset, max(len(lines) - max_lines, 0)))
+        visible_lines = lines[offset : offset + max_lines]
+        return Syntax("\n".join(visible_lines), "diff", theme="monokai", word_wrap=False)
+
+    def _edit_diff(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+        before = self._read_edit_preview_source(path)
+        if before is not None and old_string in before:
+            preview = self._replacement_diff(path, before, old_string, new_string, replace_all)
+            if preview:
+                return preview
+            after = before.replace(old_string, new_string) if replace_all else before.replace(old_string, new_string, 1)
+            return self._content_diff(path, before, after, replace_all)
+        return self._content_diff(path, old_string, new_string, replace_all)
+
+    def _read_edit_preview_source(self, path: str) -> str | None:
+        target = Path(path).resolve()
+        try:
+            target.relative_to(Path.cwd())
+        except ValueError:
+            return None
+        if not target.is_file():
+            return None
+        try:
+            return target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    def _replacement_diff(
+        self, path: str, content: str, old_string: str, new_string: str, replace_all: bool = False
+    ) -> str | None:
+        old_lines = content.splitlines()
+        old_match_lines = old_string.splitlines()
+        new_match_lines = new_string.splitlines()
+        match_starts = self._match_line_starts(old_lines, old_match_lines)
+        if not old_match_lines or not new_match_lines or not match_starts:
+            return None
+        if not replace_all:
+            match_starts = match_starts[:1]
+
+        diff_lines = [
+            f"• Update({path})",
+            f"└ {self._edit_summary_for_replacements(len(old_match_lines), len(new_match_lines), len(match_starts))}",
+        ]
+        match_start_set = set(match_starts)
+        index = 0
+        while index < len(old_lines):
+            if index in match_start_set:
+                for line_number, line in enumerate(old_match_lines, start=index + 1):
+                    diff_lines.append(f"-{line_number:>4}  {line}")
+                for line_number, line in enumerate(new_match_lines, start=index + 1):
+                    diff_lines.append(f"+{line_number:>4}  {line}")
+                index += len(old_match_lines)
+            else:
+                diff_lines.append(f" {index + 1:>4}  {old_lines[index]}")
+                index += 1
+        return "\n".join(diff_lines)
+
+    def _match_line_starts(self, lines: list[str], match_lines: list[str]) -> list[int]:
+        if not match_lines:
+            return []
+        width = len(match_lines)
+        return [index for index in range(len(lines) - width + 1) if lines[index : index + width] == match_lines]
+
+    def _edit_summary_for_replacements(self, removed_per_match: int, added_per_match: int, count: int) -> str:
+        modified = min(removed_per_match, added_per_match) * count
+        added = max(added_per_match - removed_per_match, 0) * count
+        removed = max(removed_per_match - added_per_match, 0) * count
+        parts = []
+        if modified:
+            parts.append(f"Modified {modified} lines")
+        if added:
+            parts.append(f"Added {added} lines")
+        if removed:
+            parts.append(f"Removed {removed} lines")
+        return ", ".join(parts) if parts else "No changes"
+
+    def _content_diff(self, path: str, before: str, after: str, replace_all: bool = False) -> str:
+        old_lines = before.splitlines()
+        new_lines = after.splitlines()
+        matcher = SequenceMatcher(None, old_lines, new_lines)
+        changes = [opcode for opcode in matcher.get_opcodes() if opcode[0] != "equal"]
+        visible_changes = changes if replace_all else changes[:1]
+        summary = self._edit_summary_for_changes(visible_changes)
+        diff_lines = [f"• Update({path})", f"└ {summary}"]
+        change_by_start = {i1: (tag, i1, i2, j1, j2) for tag, i1, i2, j1, j2 in visible_changes}
+        index = 0
+        while index <= len(old_lines):
+            change = change_by_start.get(index)
+            if change:
+                _, i1, i2, j1, j2 = change
+                for line_number, line in enumerate(old_lines[i1:i2], start=i1 + 1):
+                    diff_lines.append(f"-{line_number:>4}  {line}")
+                for line_number, line in enumerate(new_lines[j1:j2], start=j1 + 1):
+                    diff_lines.append(f"+{line_number:>4}  {line}")
+                if i2 == i1:
+                    change_by_start.pop(index)
+                    if index == len(old_lines):
+                        break
+                else:
+                    index = i2
+                    continue
+            if index == len(old_lines):
+                break
+            diff_lines.append(f" {index + 1:>4}  {old_lines[index]}")
+            index += 1
+        return "\n".join(diff_lines)
+
+    def _edit_summary_for_changes(self, changes) -> str:
+        modified = 0
+        added = 0
+        removed = 0
+        for tag, i1, i2, j1, j2 in changes:
+            if tag == "replace":
+                changed_old = i2 - i1
+                changed_new = j2 - j1
+                modified += min(changed_old, changed_new)
+                added += max(changed_new - changed_old, 0)
+                removed += max(changed_old - changed_new, 0)
+            elif tag == "insert":
+                added += j2 - j1
+            elif tag == "delete":
+                removed += i2 - i1
+        parts = []
+        if modified:
+            parts.append(f"Modified {modified} lines")
+        if added:
+            parts.append(f"Added {added} lines")
+        if removed:
+            parts.append(f"Removed {removed} lines")
+        return ", ".join(parts) if parts else "No changes"
+
+    def _parse_tool_args(self, args: str):
+        try:
+            return ast.literal_eval(args)
+        except (SyntaxError, ValueError):
+            return None
+
+    def _permission_title(self, name: str) -> str:
+        titles = {"read": "Read file", "write": "Write file", "edit": "Edit file", "bash": "Run command"}
+        return titles.get(name, name.replace("_", " ").title())
+
+    def _input_line(self, prompt: str) -> Text:
+        line = Text.assemble(("› ", "bold bright_black"), (prompt, "white"))
+        line.truncate(max(1, self.console.width - 1), overflow="crop", pad=True)
+        line.stylize("on grey19")
+        return line
+
+    def _input_help(self) -> Text:
+        left = Text("  ? for shortcuts", style="dim")
+        right = Text("/exit to quit", style="dim")
+        padding = max(1, self.console.width - 1 - left.cell_len - right.cell_len)
+        return Text.assemble(left, (" " * padding, "dim"), right)
+
+
 class VibeTUI:
     def __init__(
         self,
@@ -58,6 +384,7 @@ class VibeTUI:
         api_key: str | None = None,
     ):
         self.console = Console()
+        self.view = TerminalView(self.console)
         self._history: list[RenderableType] = []
         self._input = ""
         self._status: Text | None = None
@@ -82,6 +409,8 @@ class VibeTUI:
         )
 
     def _ensure_state(self):
+        if not hasattr(self, "view"):
+            self.view = TerminalView(self.console)
         if not hasattr(self, "_history"):
             self._history = []
         if not hasattr(self, "_input"):
@@ -471,77 +800,92 @@ class VibeTUI:
                 return self._pending_tool_calls.pop(i)
         return self._pending_tool_calls.pop(0) if self._pending_tool_calls else None
 
+    def _view(self) -> TerminalView:
+        if not hasattr(self, "view"):
+            self.view = TerminalView(self.console)
+        self.view.console = self.console
+        return self.view
+
     def _screen(self):
         if self._permission:
             return self._permission_panel(self._permission)
-        renderables = [
-            renderable for renderable in (self._status_line(), self._queue_panel(), self._input_panel()) if renderable
-        ]
-        return Group(*renderables) if len(renderables) > 1 else renderables[0]
+        return self._view().render_live_prompt(self._prompt_live_view_model())
+
+    def _prompt_live_view_model(self) -> PromptLiveViewModel:
+        return PromptLiveViewModel(
+            input_text=self._input,
+            status=self._status.plain if self._status else None,
+            agent_busy=self._agent_busy,
+            exit_after_active=self._exit_after_active,
+            queued_prompts=tuple(self._prompt_queue),
+        )
+
+    def _permission_dialog_view_model(self) -> PermissionDialogViewModel:
+        assert self._permission is not None
+        return PermissionDialogViewModel(
+            name=self._permission.name,
+            args=self._permission.args,
+            selected=self._permission.selected,
+            scroll_offset=self._permission.scroll_offset,
+            terminal_height=self.console.height,
+        )
 
     def _status_line(self):
-        parts: list[tuple[str, str]] = []
-        if self._status:
-            parts.append((self._status.plain, "cyan"))
-        elif self._agent_busy:
-            parts.append(("thinking", "cyan"))
-        if self._exit_after_active:
-            parts.append(("exiting after current turn", "bright_black"))
-        if not parts:
-            return None
-        chunks = []
-        for index, (text, style) in enumerate(parts):
-            if index:
-                chunks.append((" · ", "bright_black"))
-            chunks.append((text, style))
-        return Text.assemble(*chunks)
+        return self._view()._status_line(
+            self._status.plain if self._status else None,
+            self._agent_busy,
+            self._exit_after_active,
+        )
 
     def _queue_panel(self):
-        if not self._prompt_queue:
-            return None
-        body = Text()
-        prompts = list(self._prompt_queue)
-        for index, prompt in enumerate(prompts[:3], start=1):
-            body.append(f"{index}. ", style="bright_black")
-            body.append(self._compact_prompt(prompt), style="white")
-            body.append("\n")
-        if len(prompts) > 3:
-            body.append(f"… {len(prompts) - 3} more\n", style="bright_black")
-        body.append("Esc removes the last queued item", style="bright_black")
-        title = f"Queue · {len(prompts)} pending"
-        return Panel(body, title=title, border_style="yellow", padding=(0, 1))
+        return self._view()._queue_panel(tuple(self._prompt_queue))
 
     def _compact_prompt(self, prompt: str):
-        compact = " ".join(prompt.split())
-        if len(compact) <= 40:
-            return compact
-        return f"{compact[:37]}..."
+        return self._view()._compact_prompt(prompt)
 
     def _input_panel(self):
-        line = Text.assemble(("› ", "bold bright_black"), (self._input, "white"), ("█", "white"))
-        return Panel(line, border_style="bright_black", padding=(0, 1))
+        return self._view()._input_panel(self._input)
 
     def _permission_panel(self, request: PermissionRequest):
-        options = [
-            "Yes",
-            f"Yes, allow {request.name} during this session",
-            "No",
-        ]
-        preview = self._permission_call_preview(request.name, request.args, request.scroll_offset)
-        header = Text.assemble((self._permission_title(request.name), "bold cyan"))
-        if isinstance(preview, str):
-            header.append("\n")
-            header.append(preview, style="dim")
+        model = PermissionDialogViewModel(
+            name=request.name,
+            args=request.args,
+            selected=request.selected,
+            scroll_offset=request.scroll_offset,
+            terminal_height=self.console.height,
+        )
+        panel = self._view().render_permission_dialog(model)
+        request.scroll_offset = self._clamped_permission_scroll_offset(request)
+        return panel
 
-        footer = Text("\nDo you want to proceed?\n", style="bright_black")
-        for index, option in enumerate(options):
-            prefix = "❯" if index == request.selected else " "
-            style = "white" if index == request.selected else "bright_black"
-            footer.append(f"{prefix} {index + 1}. {option}\n", style=style)
-        footer.append("\nEsc to cancel · ↑/↓ to select · Enter to confirm", style="bright_black")
-        if not isinstance(preview, str):
-            return Panel(Group(header, preview, footer), border_style="cyan", padding=(0, 1))
-        return Panel(Group(header, footer), border_style="cyan", padding=(0, 1))
+    def _clamped_permission_scroll_offset(self, request: PermissionRequest) -> int:
+        diff = self._permission_preview_diff(request.name, request.args)
+        if diff is None:
+            return request.scroll_offset
+        max_lines = max(self.console.height - 11, 3)
+        return max(0, min(request.scroll_offset, max(len(diff.splitlines()) - max_lines, 0)))
+
+    def _permission_preview_diff(self, name: str, args: str) -> str | None:
+        parsed_args = self._parse_tool_args(args)
+        if not isinstance(parsed_args, dict) or not parsed_args:
+            return None
+        if name == "edit":
+            path = parsed_args.get("path")
+            old_string = parsed_args.get("old_string")
+            new_string = parsed_args.get("new_string")
+            if not isinstance(path, str) or not isinstance(old_string, str) or not isinstance(new_string, str):
+                return None
+            return self._edit_diff(path, old_string, new_string, parsed_args.get("replace_all") is True)
+        if name == "write":
+            path = parsed_args.get("path")
+            content = parsed_args.get("content")
+            if not isinstance(path, str) or not isinstance(content, str):
+                return None
+            before = self._read_edit_preview_source(path)
+            if before is None:
+                return self._content_diff(path, "", content).replace(f"• Update({path})", f"• Create({path})", 1)
+            return self._content_diff(path, before, content, replace_all=True)
+        return None
 
     def _append(self, renderable: RenderableType):
         self._history.append(renderable)
@@ -555,47 +899,29 @@ class VibeTUI:
         self.console.print(renderable)
 
     def _header(self):
-        return Text.assemble(
-            ("▸ vibe", "bold cyan"),
-            (f"  session {self.conversation.session_id} · /exit to quit", "dim"),
-        )
+        return self._view().render_header(self.conversation.session_id)
 
     def _user_message(self, prompt: str):
-        return self._input_line(prompt)
+        return self._view().render_transcript_event(TranscriptViewEvent("user", prompt))
 
     def _assistant_message(self, content: str):
-        return Markdown(content.strip("\n"))
+        return self._view().render_transcript_event(TranscriptViewEvent("assistant", content))
 
     def _tool_call(self, event: AgentEvent):
-        return Text.assemble(("* ", "yellow"), (event.name or "tool", "cyan"), (f" {event.content}", "dim"))
+        return self._view().render_transcript_event(
+            TranscriptViewEvent("tool_call", event.content, event.name, event.tool_call_id)
+        )
 
     def _tool_result(self, event: AgentEvent):
-        lines = event.content.split("\n")
-        first = f"  → {lines[0]}"
-        rest = [f"    {line}" for line in lines[1:]]
-        return Text("\n".join([first, *rest]), style="dim")
+        return self._view().render_transcript_event(
+            TranscriptViewEvent("tool_result", event.content, event.name, event.tool_call_id)
+        )
 
     def _edit_preview(self, args: dict, scroll_offset: int = 0):
-        path = args.get("path")
-        old_string = args.get("old_string")
-        new_string = args.get("new_string")
-        if not isinstance(path, str) or not isinstance(old_string, str) or not isinstance(new_string, str):
-            return None
-        replace_all = args.get("replace_all") is True
-        return self._scrollable_diff_preview(self._edit_diff(path, old_string, new_string, replace_all), scroll_offset)
+        return self._view()._edit_preview(args, scroll_offset, self.console.height)
 
     def _write_preview(self, args: dict, scroll_offset: int = 0):
-        path = args.get("path")
-        content = args.get("content")
-        if not isinstance(path, str) or not isinstance(content, str):
-            return None
-        before = self._read_edit_preview_source(path)
-        if before is None:
-            diff = self._content_diff(path, "", content)
-            diff = diff.replace(f"• Update({path})", f"• Create({path})", 1)
-        else:
-            diff = self._content_diff(path, before, content, replace_all=True)
-        return self._scrollable_diff_preview(diff, scroll_offset)
+        return self._view()._write_preview(args, scroll_offset, self.console.height)
 
     def _scrollable_diff_preview(self, diff: str, offset: int) -> Syntax:
         max_lines = max(self.console.height - 11, 3)
@@ -607,177 +933,54 @@ class VibeTUI:
         return Syntax("\n".join(visible_lines), "diff", theme="monokai", word_wrap=False)
 
     def _edit_diff(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-        before = self._read_edit_preview_source(path)
-        if before is not None and old_string in before:
-            preview = self._replacement_diff(path, before, old_string, new_string, replace_all)
-            if preview:
-                return preview
-            after = before.replace(old_string, new_string) if replace_all else before.replace(old_string, new_string, 1)
-            return self._content_diff(path, before, after, replace_all)
-        return self._content_diff(path, old_string, new_string, replace_all)
+        return self._view()._edit_diff(path, old_string, new_string, replace_all)
 
     def _read_edit_preview_source(self, path: str) -> str | None:
-        target = Path(path).resolve()
-        try:
-            target.relative_to(Path.cwd())
-        except ValueError:
-            return None
-        if not target.is_file():
-            return None
-        try:
-            return target.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
+        return self._view()._read_edit_preview_source(path)
 
     def _replacement_diff(
         self, path: str, content: str, old_string: str, new_string: str, replace_all: bool = False
     ) -> str | None:
-        old_lines = content.splitlines()
-        old_match_lines = old_string.splitlines()
-        new_match_lines = new_string.splitlines()
-        match_starts = self._match_line_starts(old_lines, old_match_lines)
-        if not old_match_lines or not new_match_lines or not match_starts:
-            return None
-        if not replace_all:
-            match_starts = match_starts[:1]
-
-        diff_lines = [
-            f"• Update({path})",
-            f"└ {self._edit_summary_for_replacements(len(old_match_lines), len(new_match_lines), len(match_starts))}",
-        ]
-        match_start_set = set(match_starts)
-        index = 0
-        while index < len(old_lines):
-            if index in match_start_set:
-                for line_number, line in enumerate(old_match_lines, start=index + 1):
-                    diff_lines.append(f"-{line_number:>4}  {line}")
-                for line_number, line in enumerate(new_match_lines, start=index + 1):
-                    diff_lines.append(f"+{line_number:>4}  {line}")
-                index += len(old_match_lines)
-            else:
-                diff_lines.append(f" {index + 1:>4}  {old_lines[index]}")
-                index += 1
-        return "\n".join(diff_lines)
+        return self._view()._replacement_diff(path, content, old_string, new_string, replace_all)
 
     def _match_line_starts(self, lines: list[str], match_lines: list[str]) -> list[int]:
-        if not match_lines:
-            return []
-        width = len(match_lines)
-        return [index for index in range(len(lines) - width + 1) if lines[index : index + width] == match_lines]
+        return self._view()._match_line_starts(lines, match_lines)
 
     def _edit_summary_for_replacements(self, removed_per_match: int, added_per_match: int, count: int) -> str:
-        modified = min(removed_per_match, added_per_match) * count
-        added = max(added_per_match - removed_per_match, 0) * count
-        removed = max(removed_per_match - added_per_match, 0) * count
-        parts = []
-        if modified:
-            parts.append(f"Modified {modified} lines")
-        if added:
-            parts.append(f"Added {added} lines")
-        if removed:
-            parts.append(f"Removed {removed} lines")
-        return ", ".join(parts) if parts else "No changes"
+        return self._view()._edit_summary_for_replacements(removed_per_match, added_per_match, count)
 
     def _content_diff(self, path: str, before: str, after: str, replace_all: bool = False) -> str:
-        old_lines = before.splitlines()
-        new_lines = after.splitlines()
-        matcher = SequenceMatcher(None, old_lines, new_lines)
-        changes = [opcode for opcode in matcher.get_opcodes() if opcode[0] != "equal"]
-        visible_changes = changes if replace_all else changes[:1]
-        summary = self._edit_summary_for_changes(visible_changes)
-        diff_lines = [f"• Update({path})", f"└ {summary}"]
-        change_by_start = {i1: (tag, i1, i2, j1, j2) for tag, i1, i2, j1, j2 in visible_changes}
-        index = 0
-        while index <= len(old_lines):
-            change = change_by_start.get(index)
-            if change:
-                _, i1, i2, j1, j2 = change
-                for line_number, line in enumerate(old_lines[i1:i2], start=i1 + 1):
-                    diff_lines.append(f"-{line_number:>4}  {line}")
-                for line_number, line in enumerate(new_lines[j1:j2], start=j1 + 1):
-                    diff_lines.append(f"+{line_number:>4}  {line}")
-                if i2 == i1:
-                    change_by_start.pop(index)
-                    if index == len(old_lines):
-                        break
-                else:
-                    index = i2
-                    continue
-            if index == len(old_lines):
-                break
-            diff_lines.append(f" {index + 1:>4}  {old_lines[index]}")
-            index += 1
-        return "\n".join(diff_lines)
+        return self._view()._content_diff(path, before, after, replace_all)
 
     def _edit_summary_for_changes(self, changes):
-        modified = 0
-        added = 0
-        removed = 0
-        for tag, i1, i2, j1, j2 in changes:
-            if tag == "replace":
-                changed_old = i2 - i1
-                changed_new = j2 - j1
-                modified += min(changed_old, changed_new)
-                added += max(changed_new - changed_old, 0)
-                removed += max(changed_old - changed_new, 0)
-            elif tag == "insert":
-                added += j2 - j1
-            elif tag == "delete":
-                removed += i2 - i1
-        parts = []
-        if modified:
-            parts.append(f"Modified {modified} lines")
-        if added:
-            parts.append(f"Added {added} lines")
-        if removed:
-            parts.append(f"Removed {removed} lines")
-        return ", ".join(parts) if parts else "No changes"
+        return self._view()._edit_summary_for_changes(changes)
 
     def _permission_call_preview(self, name: str, args: str, scroll_offset: int = 0) -> str | Syntax:
-        parsed_args = self._parse_tool_args(args)
-        if isinstance(parsed_args, dict) and parsed_args:
-            if name == "edit":
-                edit_preview = self._edit_preview(parsed_args, scroll_offset)
-                if edit_preview:
-                    return edit_preview
-            if name == "write":
-                write_preview = self._write_preview(parsed_args, scroll_offset)
-                if write_preview:
-                    return write_preview
-            first_arg = next(iter(parsed_args.values()))
-            return f"{name}({first_arg})"
-        return f"{name}({args})"
+        preview = self._view()._permission_call_preview(name, args, scroll_offset, self.console.height)
+        if self._permission and isinstance(preview, Syntax):
+            self._permission.scroll_offset = self._clamped_permission_scroll_offset(self._permission)
+        return preview
 
     def _parse_tool_args(self, args: str):
-        try:
-            return ast.literal_eval(args)
-        except (SyntaxError, ValueError):
-            return None
+        return self._view()._parse_tool_args(args)
 
     def _permission_title(self, name: str):
-        titles = {"read": "Read file", "write": "Write file", "edit": "Edit file", "bash": "Run command"}
-        return titles.get(name, name.replace("_", " ").title())
+        return self._view()._permission_title(name)
 
     def _input_prompt(self):
-        return Text.assemble(("› ", "bold bright_black"))
+        return self._view().render_input_prompt()
 
     def _input_line(self, prompt: str):
-        line = Text.assemble(("› ", "bold bright_black"), (prompt, "white"))
-        line.truncate(max(1, self.console.width - 1), overflow="crop", pad=True)
-        line.stylize("on grey19")
-        return line
+        return self._view()._input_line(prompt)
 
     def _input_help(self):
-        left = Text("  ? for shortcuts", style="dim")
-        right = Text("/exit to quit", style="dim")
-        padding = max(1, self.console.width - 1 - left.cell_len - right.cell_len)
-        return Text.assemble(left, (" " * padding, "dim"), right)
+        return self._view()._input_help()
 
     def _draw_input_block(self):
-        self.console.print(Rule(style="bright_black"))
-        self.console.print(self._input_line(""))
-        self.console.print(Rule(style="bright_black"))
-        self.console.print(self._input_help(), end="")
+        renderables = self._view().render_input_block()
+        for renderable in renderables[:-1]:
+            self.console.print(renderable)
+        self.console.print(renderables[-1], end="")
 
 
 def read_stdin_byte(fd: int) -> bytes:
