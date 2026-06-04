@@ -4,7 +4,8 @@ from unittest.mock import Mock, patch
 from rich.console import Console
 
 from vibe.agent.conversation import AgentEvent
-from vibe.tui import VibeTUI
+from vibe.agent.permissions import ToolPermissionRequest
+from vibe.tui import PermissionRequest, VibeTUI
 
 
 def make_tui() -> VibeTUI:
@@ -125,3 +126,34 @@ def test_initial_prompt_is_not_read_from_input_before_submit():
         tui.run("hello")
 
     submit.assert_called_once_with("hello")
+
+
+def test_permission_prompt_allows_current_tool_pattern():
+    tui = make_tui()
+    tui._read_permission_choice = Mock(return_value="a")
+    request = ToolPermissionRequest(name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*")
+
+    decision = tui._permission_prompt(request)
+
+    assert decision.allowed is True
+    assert decision.grant_pattern == "read:*"
+
+
+def test_permission_prompt_single_allow_does_not_add_grant_pattern():
+    tui = make_tui()
+    tui._read_permission_choice = Mock(return_value="y")
+    request = ToolPermissionRequest(name="read", args="{'path': 'file.txt'}", target="read:/repo/file.txt", grant_pattern="read:*")
+
+    decision = tui._permission_prompt(request)
+
+    assert decision.allowed is True
+    assert decision.grant_pattern is None
+
+
+def test_permission_panel_allows_tool_not_all_tools():
+    tui = make_tui()
+    tui.console.print(tui._permission_panel(PermissionRequest("read", "{'path': 'file.txt'}")))
+    output = tui.console.file.getvalue()
+
+    assert "allow read during this session" in output
+    assert "allow all tools" not in output

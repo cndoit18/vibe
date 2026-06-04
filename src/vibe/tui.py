@@ -17,6 +17,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 from vibe.agent.conversation import AgentConversation, AgentEvent
+from vibe.agent.permissions import PermissionDecision, ToolPermissionRequest
 
 EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", ":q"}
 
@@ -47,7 +48,6 @@ class VibeTUI:
         self._input = ""
         self._status: Text | None = None
         self._permission: PermissionRequest | None = None
-        self._permission_allow_all = False
         self._live: Live | None = None
         self._pending_tool_calls: list[AgentEvent] = []
         self.conversation = AgentConversation(
@@ -67,8 +67,6 @@ class VibeTUI:
             self._status = None
         if not hasattr(self, "_permission"):
             self._permission = None
-        if not hasattr(self, "_permission_allow_all"):
-            self._permission_allow_all = False
         if not hasattr(self, "_live"):
             self._live = None
         if not hasattr(self, "_pending_tool_calls"):
@@ -162,14 +160,11 @@ class VibeTUI:
                 self._input += key.value
             self._refresh()
 
-    def _permission_prompt(self, name: str, args: str) -> bool:
-        if self._permission_allow_all:
-            return True
-        choice = self._read_permission_choice(name, args)
+    def _permission_prompt(self, request: ToolPermissionRequest) -> PermissionDecision:
+        choice = self._read_permission_choice(request.name, request.args)
         if choice == "a":
-            self._permission_allow_all = True
-            return True
-        return choice == "y"
+            return PermissionDecision(allowed=True, grant_pattern=request.grant_pattern)
+        return PermissionDecision(allowed=choice == "y")
 
     def _read_permission_choice(self, name: str, args: str) -> str:
         if self._live is None:
@@ -247,7 +242,7 @@ class VibeTUI:
     def _permission_panel(self, request: PermissionRequest):
         options = [
             "Yes",
-            "Yes, allow all tools during this session",
+            f"Yes, allow {request.name} during this session",
             "No",
         ]
         body = Text.assemble(
