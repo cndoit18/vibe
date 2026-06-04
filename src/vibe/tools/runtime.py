@@ -80,5 +80,5 @@ def _deliver_output(tool_name: str, result: str) -> str:
     output_path.write_text(result, encoding="utf-8", errors="replace")
     return (
         f"Tool output is {len(result)} chars, saved to '{output_path}'. "
-        "Use read with offset and limit, or bash with grep, to inspect the saved output."
+        "Re-invoke with a lower limit, or use bash with grep, to inspect this file."
     )

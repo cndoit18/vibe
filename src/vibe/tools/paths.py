@@ -46,8 +46,4 @@ def workspace_file(raw: str, *, max_bytes: int = MAX_FILE_SIZE) -> WorkspacePath
     if not path.resolved.is_file():
         raise ValueError(f"'{raw}' is not a file")
 
-    size = path.resolved.stat().st_size
-    if size > max_bytes:
-        raise ValueError(f"File '{raw}' is {size} bytes, exceeds {max_bytes} byte limit")
-
     return path
