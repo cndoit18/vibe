@@ -23,8 +23,16 @@ class TestEditTool:
         f.write_text("aaa aaa aaa")
         result = edit.invoke({"path": "file.txt", "old_string": "aaa", "new_string": "bbb"})
         assert "3 times" in result
+        assert "larger old_string" in result
+        assert f.read_text() == "aaa aaa aaa"
 
-    def test_edit_nonexistent_file(self, tmp_path, monkeypatch):
+    def test_edit_replace_all(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "file.txt"
+        f.write_text("aaa aaa aaa")
+        result = edit.invoke({"path": "file.txt", "old_string": "aaa", "new_string": "bbb", "replace_all": True})
+        assert "replaced 3 occurrence" in result
+        assert f.read_text() == "bbb bbb bbb"
         monkeypatch.chdir(tmp_path)
         result = edit.invoke({"path": "nope.txt", "old_string": "x", "new_string": "y"})
         assert "not a file" in result

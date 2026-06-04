@@ -62,6 +62,8 @@ class AgentConversation:
                     yield from self._events_from_message(msg)
 
     def _events_from_message(self, msg) -> Iterator[AgentEvent]:
+        if msg.type == "ai" and msg.content:
+            yield AgentEvent("assistant", str(msg.content))
         if getattr(msg, "tool_calls", None):
             for tool_call in msg.tool_calls:
                 yield AgentEvent(
@@ -74,5 +76,3 @@ class AgentConversation:
                 getattr(msg, "name", None),
                 tool_call_id=getattr(msg, "tool_call_id", None),
             )
-        elif msg.type == "ai" and msg.content:
-            yield AgentEvent("assistant", str(msg.content))

@@ -1,16 +1,18 @@
 import ast
 import codecs
 from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 import os
+from pathlib import Path
 import queue
 import select
 import sys
 import termios
 import threading
-import tty
-from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any
+import tty
 
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
@@ -18,6 +20,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.rule import Rule
+from rich.syntax import Syntax
 from rich.text import Text
 
 from vibe.agent.conversation import AgentConversation, AgentEvent
@@ -37,6 +40,7 @@ class PermissionRequest:
     name: str
     args: str
     selected: int = 0
+    scroll_offset: int = 0
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,7 @@ class VibeTUI:
         self._active_prompt: str | None = None
         self._active_first_event = False
         self._permission_reply_queue: queue.Queue[str] | None = None
+        self._permission_mouse_enabled = False
         self._exit_after_active = False
         self.conversation = AgentConversation(
             session_id=session_id,
@@ -103,6 +108,8 @@ class VibeTUI:
             self._active_first_event = False
         if not hasattr(self, "_permission_reply_queue"):
             self._permission_reply_queue = None
+        if not hasattr(self, "_permission_mouse_enabled"):
+            self._permission_mouse_enabled = False
         if not hasattr(self, "_exit_after_active"):
             self._exit_after_active = False
 
@@ -142,6 +149,7 @@ class VibeTUI:
                 except (EOFError, KeyboardInterrupt):
                     break
                 self._refresh()
+        self._disable_permission_mouse()
         self._live = None
 
     def _run_plain(self, initial_prompt: str | None):
@@ -173,13 +181,15 @@ class VibeTUI:
         self._pending_tool_calls.clear()
 
     def _events_from_message(self, msg):
+        if msg.type == "ai" and msg.content:
+            yield AgentEvent("assistant", str(msg.content))
         if getattr(msg, "tool_calls", None):
             for tc in msg.tool_calls:
                 yield AgentEvent("tool_call", str(tc["args"]), tc["name"], tc.get("id"))
         elif msg.type == "tool":
-            yield AgentEvent("tool_result", str(msg.content), getattr(msg, "name", None), getattr(msg, "tool_call_id", None))
-        elif msg.type == "ai" and msg.content:
-            yield AgentEvent("assistant", str(msg.content))
+            yield AgentEvent(
+                "tool_result", str(msg.content), getattr(msg, "name", None), getattr(msg, "tool_call_id", None)
+            )
 
     def _submit(self, prompt: str):
         self._ensure_state()
@@ -256,6 +266,7 @@ class VibeTUI:
             request, reply_queue = message.payload
             self._permission = PermissionRequest(request.name, request.args)
             self._permission_reply_queue = reply_queue
+            self._enable_permission_mouse()
         elif message.kind == "agent_done":
             for call in self._pending_tool_calls:
                 self._append(self._tool_call(call))
@@ -310,6 +321,7 @@ class VibeTUI:
 
         choices = ["y", "a", "n"]
         self._permission = PermissionRequest(name, args)
+        self._enable_permission_mouse()
         self._refresh()
         try:
             while True:
@@ -318,7 +330,11 @@ class VibeTUI:
                     return choices[self._permission.selected]
                 if key.name in {"escape", "ctrl_c", "ctrl_d"}:
                     return "n"
-                if key.name == "up":
+                if key.name == "scroll_up":
+                    self._permission.scroll_offset = max(0, self._permission.scroll_offset - 3)
+                elif key.name == "scroll_down":
+                    self._permission.scroll_offset += 3
+                elif key.name == "up":
                     self._permission.selected = (self._permission.selected - 1) % len(choices)
                 elif key.name == "down":
                     self._permission.selected = (self._permission.selected + 1) % len(choices)
@@ -333,6 +349,7 @@ class VibeTUI:
                 self._refresh()
         finally:
             self._permission = None
+            self._disable_permission_mouse()
             self._refresh()
 
     def _read_permission_choice_plain(self, name: str, args: str) -> str:
@@ -385,6 +402,10 @@ class VibeTUI:
             self._finish_permission_choice(choices[self._permission.selected])
         elif key.name in {"escape", "ctrl_c", "ctrl_d"}:
             self._finish_permission_choice("n")
+        elif key.name == "scroll_up":
+            self._permission.scroll_offset = max(0, self._permission.scroll_offset - 3)
+        elif key.name == "scroll_down":
+            self._permission.scroll_offset += 3
         elif key.name == "up":
             self._permission.selected = (self._permission.selected - 1) % len(choices)
         elif key.name == "down":
@@ -402,12 +423,31 @@ class VibeTUI:
         reply_queue = self._permission_reply_queue
         self._permission = None
         self._permission_reply_queue = None
+        self._disable_permission_mouse()
         if reply_queue is not None:
             reply_queue.put(choice)
 
     def _undo_last_queued_prompt(self):
         if self._prompt_queue:
             self._prompt_queue.pop()
+
+    def _write_terminal_control(self, sequence: str):
+        try:
+            with Path("/dev/tty").open("w", encoding="utf-8") as terminal:
+                terminal.write(sequence)
+                terminal.flush()
+        except OSError:
+            pass
+
+    def _enable_permission_mouse(self):
+        if not self._permission_mouse_enabled and self.console.is_terminal:
+            self._write_terminal_control("\x1b[?1000h\x1b[?1006h")
+            self._permission_mouse_enabled = True
+
+    def _disable_permission_mouse(self):
+        if self._permission_mouse_enabled:
+            self._write_terminal_control("\x1b[?1006l\x1b[?1000l")
+            self._permission_mouse_enabled = False
 
     def _render_event(self, event: AgentEvent):
         if event.kind == "tool_call":
@@ -434,7 +474,9 @@ class VibeTUI:
     def _screen(self):
         if self._permission:
             return self._permission_panel(self._permission)
-        renderables = [renderable for renderable in (self._status_line(), self._queue_panel(), self._input_panel()) if renderable]
+        renderables = [
+            renderable for renderable in (self._status_line(), self._queue_panel(), self._input_panel()) if renderable
+        ]
         return Group(*renderables) if len(renderables) > 1 else renderables[0]
 
     def _status_line(self):
@@ -485,20 +527,21 @@ class VibeTUI:
             f"Yes, allow {request.name} during this session",
             "No",
         ]
-        body = Text.assemble(
-            (self._permission_title(request.name), "bold cyan"),
-            "\n\n",
-            (self._permission_call_preview(request.name, request.args), "dim"),
-            "\n\n",
-            ("Do you want to proceed?", "bright_black"),
-            "\n",
-        )
+        preview = self._permission_call_preview(request.name, request.args, request.scroll_offset)
+        header = Text.assemble((self._permission_title(request.name), "bold cyan"))
+        if isinstance(preview, str):
+            header.append("\n")
+            header.append(preview, style="dim")
+
+        footer = Text("\nDo you want to proceed?\n", style="bright_black")
         for index, option in enumerate(options):
             prefix = "❯" if index == request.selected else " "
             style = "white" if index == request.selected else "bright_black"
-            body.append(f"{prefix} {index + 1}. {option}\n", style=style)
-        body.append("\nEsc to cancel · ↑/↓ to select · Enter to confirm", style="bright_black")
-        return Panel(body, border_style="cyan", padding=(0, 1))
+            footer.append(f"{prefix} {index + 1}. {option}\n", style=style)
+        footer.append("\nEsc to cancel · ↑/↓ to select · Enter to confirm", style="bright_black")
+        if not isinstance(preview, str):
+            return Panel(Group(header, preview, footer), border_style="cyan", padding=(0, 1))
+        return Panel(Group(header, footer), border_style="cyan", padding=(0, 1))
 
     def _append(self, renderable: RenderableType):
         self._history.append(renderable)
@@ -532,9 +575,156 @@ class VibeTUI:
         rest = [f"    {line}" for line in lines[1:]]
         return Text("\n".join([first, *rest]), style="dim")
 
-    def _permission_call_preview(self, name: str, args: str) -> str:
+    def _edit_preview(self, args: dict, scroll_offset: int = 0):
+        path = args.get("path")
+        old_string = args.get("old_string")
+        new_string = args.get("new_string")
+        if not isinstance(path, str) or not isinstance(old_string, str) or not isinstance(new_string, str):
+            return None
+        replace_all = args.get("replace_all") is True
+        return self._scrollable_diff_preview(self._edit_diff(path, old_string, new_string, replace_all), scroll_offset)
+
+    def _scrollable_diff_preview(self, diff: str, offset: int) -> Syntax:
+        max_lines = max(self.console.height - 11, 3)
+        lines = diff.splitlines()
+        offset = max(0, min(offset, max(len(lines) - max_lines, 0)))
+        visible_lines = lines[offset : offset + max_lines]
+        return Syntax("\n".join(visible_lines), "diff", theme="monokai", word_wrap=False)
+
+    def _edit_diff(self, path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+        before = self._read_edit_preview_source(path)
+        if before is not None and old_string in before:
+            preview = self._replacement_diff(path, before, old_string, new_string, replace_all)
+            if preview:
+                return preview
+            after = before.replace(old_string, new_string) if replace_all else before.replace(old_string, new_string, 1)
+            return self._content_diff(path, before, after, replace_all)
+        return self._content_diff(path, old_string, new_string, replace_all)
+
+    def _read_edit_preview_source(self, path: str) -> str | None:
+        target = Path(path).resolve()
+        try:
+            target.relative_to(Path.cwd())
+        except ValueError:
+            return None
+        if not target.is_file():
+            return None
+        try:
+            return target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    def _replacement_diff(
+        self, path: str, content: str, old_string: str, new_string: str, replace_all: bool = False
+    ) -> str | None:
+        old_lines = content.splitlines()
+        old_match_lines = old_string.splitlines()
+        new_match_lines = new_string.splitlines()
+        match_starts = self._match_line_starts(old_lines, old_match_lines)
+        if not old_match_lines or not new_match_lines or not match_starts:
+            return None
+        if not replace_all:
+            match_starts = match_starts[:1]
+
+        diff_lines = [
+            f"• Update({path})",
+            f"└ {self._edit_summary_for_replacements(len(old_match_lines), len(new_match_lines), len(match_starts))}",
+        ]
+        match_start_set = set(match_starts)
+        index = 0
+        while index < len(old_lines):
+            if index in match_start_set:
+                for line_number, line in enumerate(old_match_lines, start=index + 1):
+                    diff_lines.append(f"-{line_number:>4}  {line}")
+                for line_number, line in enumerate(new_match_lines, start=index + 1):
+                    diff_lines.append(f"+{line_number:>4}  {line}")
+                index += len(old_match_lines)
+            else:
+                diff_lines.append(f" {index + 1:>4}  {old_lines[index]}")
+                index += 1
+        return "\n".join(diff_lines)
+
+    def _match_line_starts(self, lines: list[str], match_lines: list[str]) -> list[int]:
+        if not match_lines:
+            return []
+        width = len(match_lines)
+        return [index for index in range(len(lines) - width + 1) if lines[index : index + width] == match_lines]
+
+    def _edit_summary_for_replacements(self, removed_per_match: int, added_per_match: int, count: int) -> str:
+        modified = min(removed_per_match, added_per_match) * count
+        added = max(added_per_match - removed_per_match, 0) * count
+        removed = max(removed_per_match - added_per_match, 0) * count
+        parts = []
+        if modified:
+            parts.append(f"Modified {modified} lines")
+        if added:
+            parts.append(f"Added {added} lines")
+        if removed:
+            parts.append(f"Removed {removed} lines")
+        return ", ".join(parts) if parts else "No changes"
+
+    def _content_diff(self, path: str, before: str, after: str, replace_all: bool = False) -> str:
+        old_lines = before.splitlines()
+        new_lines = after.splitlines()
+        matcher = SequenceMatcher(None, old_lines, new_lines)
+        changes = [opcode for opcode in matcher.get_opcodes() if opcode[0] != "equal"]
+        visible_changes = changes if replace_all else changes[:1]
+        summary = self._edit_summary_for_changes(visible_changes)
+        diff_lines = [f"• Update({path})", f"└ {summary}"]
+        change_by_start = {i1: (tag, i1, i2, j1, j2) for tag, i1, i2, j1, j2 in visible_changes}
+        index = 0
+        while index <= len(old_lines):
+            change = change_by_start.get(index)
+            if change:
+                _, i1, i2, j1, j2 = change
+                for line_number, line in enumerate(old_lines[i1:i2], start=i1 + 1):
+                    diff_lines.append(f"-{line_number:>4}  {line}")
+                for line_number, line in enumerate(new_lines[j1:j2], start=j1 + 1):
+                    diff_lines.append(f"+{line_number:>4}  {line}")
+                if i2 == i1:
+                    change_by_start.pop(index)
+                    if index == len(old_lines):
+                        break
+                else:
+                    index = i2
+                    continue
+            if index == len(old_lines):
+                break
+            diff_lines.append(f" {index + 1:>4}  {old_lines[index]}")
+            index += 1
+        return "\n".join(diff_lines)
+
+    def _edit_summary_for_changes(self, changes):
+        modified = 0
+        added = 0
+        removed = 0
+        for tag, i1, i2, j1, j2 in changes:
+            if tag == "replace":
+                changed_old = i2 - i1
+                changed_new = j2 - j1
+                modified += min(changed_old, changed_new)
+                added += max(changed_new - changed_old, 0)
+                removed += max(changed_old - changed_new, 0)
+            elif tag == "insert":
+                added += j2 - j1
+            elif tag == "delete":
+                removed += i2 - i1
+        parts = []
+        if modified:
+            parts.append(f"Modified {modified} lines")
+        if added:
+            parts.append(f"Added {added} lines")
+        if removed:
+            parts.append(f"Removed {removed} lines")
+        return ", ".join(parts) if parts else "No changes"
+
+    def _permission_call_preview(self, name: str, args: str, scroll_offset: int = 0) -> str | Syntax:
         parsed_args = self._parse_tool_args(args)
         if isinstance(parsed_args, dict) and parsed_args:
+            if name == "edit":
+                edit_preview = self._edit_preview(parsed_args, scroll_offset)
+                if edit_preview:
+                    return edit_preview
             first_arg = next(iter(parsed_args.values()))
             return f"{name}({first_arg})"
         return f"{name}({args})"
@@ -599,6 +789,12 @@ def read_key(decoder=None, timeout: float | None = None) -> KeyPress:
             return KeyPress("up")
         if sequence in ("[B", "OB"):
             return KeyPress("down")
+        if sequence.startswith("[<64;") and sequence.endswith("M"):
+            return KeyPress("scroll_up")
+        if sequence.startswith("[<65;") and sequence.endswith("M"):
+            return KeyPress("scroll_down")
+        if sequence.startswith("[<") and sequence[-1:] in ("M", "m"):
+            return KeyPress("mouse")
         return KeyPress("escape")
     if decoder is None:
         return KeyPress("char", chunk.decode("utf-8", errors="ignore"))
@@ -615,7 +811,10 @@ def read_escape_sequence(fd: int) -> str:
         if not chunk:
             break
         sequence += chr(chunk[0])
-        if len(sequence) > 1 and 0x40 <= chunk[0] <= 0x7E:
+        if sequence.startswith("[<"):
+            if chunk[0] in (ord("M"), ord("m")):
+                break
+        elif len(sequence) > 1 and 0x40 <= chunk[0] <= 0x7E:
             break
     return sequence
 

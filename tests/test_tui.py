@@ -6,10 +6,11 @@ from unittest.mock import Mock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from rich.console import Console
+from rich.syntax import Syntax
 
-from vibe.agent.conversation import AgentEvent
+from vibe.agent.conversation import AgentConversation, AgentEvent
 from vibe.agent.permissions import ToolPermissionRequest
-from vibe.tui import KeyPress, PermissionRequest, VibeTUI
+from vibe.tui import KeyPress, PermissionRequest, VibeTUI, read_key
 
 
 def make_tui() -> VibeTUI:
@@ -49,6 +50,38 @@ def test_tool_call_is_rendered_as_dim_line():
     assert second.plain == "* read {'path': 'README.md'}"
 
 
+def test_edit_tool_result_is_rendered_as_plain_tool_result():
+    tui = make_tui()
+
+    tui._render_event(
+        AgentEvent(
+            "tool_call",
+            "{'path': 'file.txt', 'old_string': 'hello world', 'new_string': 'hello vibe'}",
+            "edit",
+            "tc1",
+        )
+    )
+    tui._render_event(AgentEvent("tool_result", "Edited 'file.txt': replaced 5 chars with 4 chars", "edit", "tc1"))
+
+    assert not isinstance(tui._history[-1], Syntax)
+    assert "Edited 'file.txt'" in tui.console.file.getvalue()
+
+
+def test_conversation_events_include_assistant_text_before_tool_call():
+    conversation = AgentConversation.__new__(AgentConversation)
+    message = AIMessage(
+        content="I'll run ls first.",
+        tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "tc1"}],
+    )
+
+    events = list(conversation._events_from_message(message))
+
+    assert [(event.kind, event.content, event.name) for event in events] == [
+        ("assistant", "I'll run ls first.", None),
+        ("tool_call", "{'command': 'ls'}", "bash"),
+    ]
+
+
 def test_run_uses_bottom_input_prompt_for_piped_input():
     tui = make_tui()
     tui.console.input = Mock(side_effect=["/exit"])
@@ -85,6 +118,54 @@ def test_terminal_prompt_handles_cjk_backspace_without_input_decoder():
         prompt = tui._read_terminal_prompt()
 
     assert prompt == "你"
+
+
+def test_permission_key_scrolls_preview_without_changing_selection():
+    tui = make_tui()
+    tui._permission = PermissionRequest("read", "{'path': 'file.txt'}")
+
+    tui._handle_permission_key(KeyPress("scroll_down"))
+    tui._handle_permission_key(KeyPress("scroll_down"))
+    tui._handle_permission_key(KeyPress("scroll_up"))
+
+    assert tui._permission.scroll_offset == 3
+    assert tui._permission.selected == 0
+
+
+def test_read_key_maps_xterm_mouse_wheel():
+    up_stdin = FakeStdin(b"\x1b[<64;1;1M")
+    down_stdin = FakeStdin(b"\x1b[<65;1;1M")
+    release_stdin = FakeStdin(b"\x1b[<0;1;1m")
+
+    with patch("sys.stdin", up_stdin):
+        assert read_key().name == "scroll_up"
+    with patch("sys.stdin", down_stdin):
+        assert read_key().name == "scroll_down"
+    with patch("sys.stdin", release_stdin):
+        assert read_key().name == "mouse"
+
+
+def test_mouse_release_does_not_reject_permission():
+    tui = make_tui()
+    tui._permission = PermissionRequest("read", "{'path': 'file.txt'}")
+
+    tui._handle_permission_key(KeyPress("mouse"))
+
+    assert tui._permission is not None
+
+
+def test_finish_permission_choice_disables_permission_mouse():
+    tui = make_tui()
+    tui._permission = PermissionRequest("read", "{'path': 'file.txt'}")
+    tui._permission_mouse_enabled = True
+    tui._write_terminal_control = Mock()
+    reply_queue = Queue()
+    tui._permission_reply_queue = reply_queue
+
+    tui._finish_permission_choice("y")
+
+    tui._write_terminal_control.assert_called_once_with("\x1b[?1006l\x1b[?1000l")
+    assert reply_queue.get_nowait() == "y"
 
 
 class FakeStdin:
@@ -164,6 +245,101 @@ def test_permission_panel_allows_tool_not_all_tools():
     assert "allow all tools" not in output
 
 
+def test_edit_permission_preview_shows_file_context(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "file.txt").write_text("before\nhello world\nafter\n", encoding="utf-8")
+    tui = make_tui()
+    tui.console.print(
+        tui._permission_panel(
+            PermissionRequest(
+                "edit",
+                "{'path': 'file.txt', 'old_string': 'hello world', 'new_string': 'hello vibe'}",
+            )
+        )
+    )
+    output = tui.console.file.getvalue()
+
+    assert "Update(file.txt)" in output
+    assert "Modified 1 lines" in output
+    assert "before" in output
+    assert "after" in output
+    assert "-   2  hello world" in output
+    assert "+   2  hello vibe" in output
+
+
+def test_edit_permission_preview_splits_modified_and_added_lines():
+    tui = make_tui()
+    diff = tui._content_diff("README.md", "## 使用\n", "## 🚀 使用\nextra\n")
+
+    assert "Modified 1 lines, Added 1 lines" in diff
+    assert "Modified 2 lines" not in diff
+
+
+def test_edit_permission_preview_shows_diff_before_choices():
+    tui = make_tui()
+    tui.console.print(
+        tui._permission_panel(
+            PermissionRequest(
+                "edit",
+                "{'path': 'README.md', 'old_string': '## 配置', 'new_string': '## ⚙ 配置'}",
+            )
+        )
+    )
+    output = tui.console.file.getvalue()
+
+    assert output.index("Update(README.md)") < output.index("Do you want to proceed?")
+    assert output.count("\n│                                                                              │\n│ • Update") == 0
+    assert "Modified 1 lines" in output
+    assert "Added 1 lines" not in output
+
+
+def test_edit_permission_preview_replace_all_shows_all_matches(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "file.txt").write_text("first\ntarget\nmiddle\ntarget\nlast\n", encoding="utf-8")
+    tui = make_tui()
+    tui.console.print(
+        tui._permission_panel(
+            PermissionRequest(
+                "edit",
+                "{'path': 'file.txt', 'old_string': 'target', 'new_string': 'value', 'replace_all': True}",
+            )
+        )
+    )
+    output = tui.console.file.getvalue()
+
+    assert output.count("Modified 2 lines") == 1
+    assert "-   2  target" in output
+    assert "+   2  value" in output
+    assert "-   4  target" in output
+    assert "+   4  value" in output
+
+
+def test_edit_permission_preview_scrolls_to_keep_choices_visible(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    lines = [f"line {index}" for index in range(30)]
+    lines[3] = "target"
+    lines[24] = "target"
+    (tmp_path / "file.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tui = make_tui()
+    tui.console = Console(file=StringIO(), force_terminal=True, width=80, height=20)
+    request = PermissionRequest(
+        "edit",
+        "{'path': 'file.txt', 'old_string': 'target', 'new_string': 'value', 'replace_all': True}",
+    )
+
+    tui.console.print(tui._permission_panel(request))
+    first_output = tui.console.file.getvalue()
+    tui.console.file = StringIO()
+    request.scroll_offset = 23
+    tui.console.print(tui._permission_panel(request))
+    second_output = tui.console.file.getvalue()
+
+    assert "line 2" in first_output
+    assert "line 23" in second_output
+    assert "Do you want to proceed?" in second_output
+    assert "Enter to confirm" in second_output
+
+
 def test_load_and_render_history_restores_session_messages():
     tui = make_tui()
     tui.conversation.load_history.return_value = [
@@ -183,7 +359,7 @@ def test_load_and_render_history_renders_tool_calls_and_results():
     tui.conversation.load_history.return_value = [
         HumanMessage(content="run ls"),
         AIMessage(
-            content="",
+            content="I'll run ls first.",
             tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "tc1"}],
         ),
         ToolMessage(content="file.txt", name="bash", tool_call_id="tc1"),
@@ -194,6 +370,7 @@ def test_load_and_render_history_renders_tool_calls_and_results():
     output = tui.console.file.getvalue()
 
     assert "run ls" in output
+    assert "I'll run ls first." in output
     assert "bash" in output
     assert "file.txt" in output
     assert "done" in output
