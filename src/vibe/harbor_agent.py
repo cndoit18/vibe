@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
+import tempfile
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path, PurePosixPath
 from typing import Any, TYPE_CHECKING
+
+from .config import load_settings
 
 try:
     from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
@@ -42,6 +46,9 @@ else:
 REMOTE_REPO_DIR = "/installed-agent/vibe"
 VENV_DIR = "/opt/vibe-venv"
 LOG_PATH = "/logs/agent/vibe.txt"
+SETTINGS_PATH = "/tmp/vibe-settings.json"
+REMOTE_SETTINGS_DIR = "$HOME/.vibe"
+REMOTE_SETTINGS_PATH = "$HOME/.vibe/settings.json"
 
 
 class VibeInstalledAgent(BaseInstalledAgent):
@@ -79,14 +86,24 @@ class VibeInstalledAgent(BaseInstalledAgent):
             environment,
             command=(
                 f"rm -rf {_quote(self.install_dir)} {_quote(self.venv_dir)} && "
-                f"mkdir -p {_quote(install_parent)} {_quote('/opt')} {_quote(self.log_dir)}"
+                f"mkdir -p {_quote(install_parent)} {_quote('/opt')} {_quote(self.log_dir)} && "
+                "if ! command -v uv >/dev/null 2>&1; then "
+                "if command -v apt-get >/dev/null 2>&1; then "
+                "DEBIAN_FRONTEND=noninteractive apt-get update -qq && "
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates; "
+                "elif command -v apk >/dev/null 2>&1; then "
+                "apk add --no-cache curl ca-certificates; "
+                "else echo 'No supported package manager found to install curl' >&2; exit 1; fi && "
+                "curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; "
+                "fi"
             ),
         )
         await environment.upload_dir(self.source_dir, self.install_dir)
+        await self._upload_settings(environment)
         await self.exec_as_root(
             environment,
             command=(
-                f"python3 -m venv {_quote(self.venv_dir)} && "
+                f"uv venv {_quote(self.venv_dir)} --python 3.12 --seed && "
                 f"{_quote(self.venv_python)} -m pip install --upgrade pip && "
                 f"{_quote(self.venv_python)} -m pip install -e {_quote(self.install_dir)} && "
                 f"{_quote(self.vibe_bin)} --help >/dev/null"
@@ -104,8 +121,37 @@ class VibeInstalledAgent(BaseInstalledAgent):
             ),
         )
 
+    async def _upload_settings(self, environment: BaseEnvironment) -> None:
+        settings = load_settings()
+        data = {
+            "model": _model_name(self.model_name) or settings.model,
+            "base_url": settings.base_url,
+            "api_key": settings.api_key,
+        }
+        data = {key: value for key, value in data.items() if value is not None}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings_file = Path(tmp_dir) / "settings.json"
+            settings_file.write_text(json.dumps(data), encoding="utf-8")
+            await environment.upload_file(settings_file, SETTINGS_PATH)
+
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"mkdir -p \"{REMOTE_SETTINGS_DIR}\" && "
+                f"cp {_quote(SETTINGS_PATH)} \"{REMOTE_SETTINGS_PATH}\" && "
+                f"chmod 600 \"{REMOTE_SETTINGS_PATH}\""
+            ),
+        )
+
     def populate_context_post_run(self, context: AgentContext) -> None:
         return None
+
+
+def _model_name(model_name: str | None) -> str | None:
+    if model_name is None:
+        return None
+    return model_name.split("/", 1)[-1]
 
 
 def _resolve_source_dir(source_dir: str | Path | None) -> Path:
